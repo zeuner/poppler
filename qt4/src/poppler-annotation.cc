@@ -350,7 +350,7 @@ PDFRectangle AnnotationPrivate::boundaryToPdfRectangle(const QRectF &r, int flag
 AnnotPath * AnnotationPrivate::toAnnotPath(const QLinkedList<QPointF> &list) const
 {
     const int count = list.size();
-    AnnotCoord **ac = (AnnotCoord **) gmallocn(count, sizeof(AnnotCoord*));
+    auto ac = std::make_unique<AnnotCoord[]>(count);
 
     double MTX[6];
     fillTransformationMTX(MTX);
@@ -360,10 +360,10 @@ AnnotPath * AnnotationPrivate::toAnnotPath(const QLinkedList<QPointF> &list) con
     {
         double x, y;
         XPDFReader::invTransform( MTX, p, x, y );
-        ac[pos++] = new AnnotCoord(x, y);
+        ac[pos++] = AnnotCoord(x, y);
     }
 
-    return new AnnotPath(ac, count);
+    return new AnnotPath(std::move(ac), count);
 }
 
 QList<Annotation*> AnnotationPrivate::findAnnotations(::Page *pdfPage, DocumentData *doc, const QSet<Annotation::SubType> &subtypes, int parentID)
@@ -1653,11 +1653,11 @@ void Annotation::setStyle( const Annotation::Style& style )
     if (markupann)
         markupann->setOpacity( style.opacity() );
 
-    AnnotBorderArray * border = new AnnotBorderArray();
+    auto border = std::make_unique<AnnotBorderArray>();
     border->setWidth( style.width() );
     border->setHorizontalCorner( style.xCorners() );
     border->setVerticalCorner( style.yCorners() );
-    d->pdfAnnot->setBorder(border);
+    d->pdfAnnot->setBorder(std::move(border));
 }
 
 Annotation::Popup Annotation::popup() const
@@ -2721,17 +2721,17 @@ void LineAnnotation::setLineInnerColor( const QColor &color )
         return;
     }
 
-    AnnotColor * c = convertQColor(color);
+    auto c = convertQColor(color);
 
     if (d->pdfAnnot->getType() == Annot::typeLine)
     {
         AnnotLine *lineann = static_cast<AnnotLine*>(d->pdfAnnot);
-        lineann->setInteriorColor(c);
+        lineann->setInteriorColor(std::move(c));
     }
     else
     {
         AnnotPolygon *polyann = static_cast<AnnotPolygon*>(d->pdfAnnot);
-        polyann->setInteriorColor(c);
+        polyann->setInteriorColor(std::move(c));
     }
 }
 
@@ -5077,12 +5077,12 @@ QColor convertAnnotColor( AnnotColor *color )
     return newcolor;
 }
 
-AnnotColor* convertQColor( const QColor &c )
+std::unique_ptr<AnnotColor> convertQColor( const QColor &c )
 {
     if (!c.isValid() || c.alpha() == 0)
-        return new AnnotColor(); // Transparent
+        return std::make_unique<AnnotColor>(); // Transparent
     else
-        return new AnnotColor(c.redF(), c.greenF(), c.blueF());
+        return std::make_unique<AnnotColor>(c.redF(), c.greenF(), c.blueF());
 }
 //END utility annotation functions
 

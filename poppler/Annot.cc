@@ -184,8 +184,7 @@ static AnnotExternalDataType parseAnnotExternalData(Dict* dict) {
   return type;
 }
 
-PDFRectangle *parseDiffRectangle(Array *array, PDFRectangle *rect) {
-  PDFRectangle *newRect = NULL;
+static std::unique_ptr<PDFRectangle> parseDiffRectangle(Array *array, PDFRectangle *rect) {
   if (array->getLength() == 4) {
     // deltas
     Object obj1;
@@ -199,14 +198,15 @@ PDFRectangle *parseDiffRectangle(Array *array, PDFRectangle *rect) {
     if (dx1 >= 0 && dy1 >= 0 && dx2 >= 0 && dy2
         && (rect->x2 - rect->x1 - dx1 - dx2) >= 0
         && (rect->y2 - rect->y1 - dy1 - dy2) >= 0) {
-      newRect = new PDFRectangle();
+      auto newRect = std::make_unique<PDFRectangle>();
       newRect->x1 = rect->x1 + dx1;
       newRect->y1 = rect->y1 + dy1;
       newRect->x2 = rect->x2 - dx2;
       newRect->y2 = rect->y2 - dy2;
+      return newRect;
     }
   }
-  return newRect;
+  return nullptr;
 }
 
 static LinkAction* getAdditionalAction(Annot::AdditionalActionsType type, Object *additionalActions, PDFDoc *doc) {
@@ -283,51 +283,39 @@ AnnotBorderEffect::AnnotBorderEffect(Dict *dict) {
 //------------------------------------------------------------------------
 
 AnnotPath::AnnotPath() {
-  coords = NULL;
   coordsLength = 0;
 }
 
 AnnotPath::AnnotPath(Array *array) {
-  coords = NULL;
   coordsLength = 0;
   parsePathArray(array);
 }
 
-AnnotPath::AnnotPath(AnnotCoord **coords, int coordsLength) {
-  this->coords = coords;
+AnnotPath::AnnotPath(std::unique_ptr<AnnotCoord[]> &&coords, int coordsLength) {
+  this->coords = std::move(coords);
   this->coordsLength = coordsLength;
-}
-
-AnnotPath::~AnnotPath() {
-  if (coords) {
-    for (int i = 0; i < coordsLength; ++i)
-      delete coords[i];
-    gfree(coords);
-  }
 }
 
 double AnnotPath::getX(int coord) const {
   if (coord >= 0 && coord < coordsLength)
-    return coords[coord]->getX();
+    return coords[coord].getX();
   return 0;
 }
 
 double AnnotPath::getY(int coord) const {
   if (coord >= 0 && coord < coordsLength)
-    return coords[coord]->getY();
+    return coords[coord].getY();
   return 0;
 }
 
 AnnotCoord *AnnotPath::getCoord(int coord) const {
   if (coord >= 0 && coord < coordsLength)
-    return coords[coord];
+    return &coords[coord];
   return NULL;
 }
 
 void AnnotPath::parsePathArray(Array *array) {
   int tempLength;
-  AnnotCoord **tempCoords;
-  GBool correct = gTrue;
 
   if (array->getLength() % 2) {
     error(errSyntaxError, -1, "Bad Annot Path");
@@ -335,36 +323,28 @@ void AnnotPath::parsePathArray(Array *array) {
   }
 
   tempLength = array->getLength() / 2;
-  tempCoords = (AnnotCoord **) gmallocn (tempLength, sizeof(AnnotCoord *));
-  memset(tempCoords, 0, tempLength * sizeof(AnnotCoord *));
-  for (int i = 0; i < tempLength && correct; i++) {
+  auto tempCoords = std::make_unique<AnnotCoord[]>(tempLength);
+  for (int i = 0; i < tempLength; i++) {
     double x = 0, y = 0;
 
     Object obj1 = array->get(i * 2);
     if (obj1.isNum()) {
       x = obj1.getNum();
     } else {
-      correct = gFalse;
+      return;
     }
 
     obj1 = array->get((i * 2) + 1);
     if (obj1.isNum()) {
       y = obj1.getNum();
     } else {
-      correct = gFalse;
-    }
-
-    if (!correct) {
-      for (int j = i - 1; j >= 0; j--)
-        delete tempCoords[j];
-      gfree (tempCoords);
       return;
     }
 
-    tempCoords[i] = new AnnotCoord(x, y);
+    tempCoords[i] = { x, y };
   }
 
-  coords = tempCoords;
+  coords = std::move(tempCoords);
   coordsLength = tempLength;
 }
 
@@ -391,114 +371,90 @@ AnnotCalloutMultiLine::AnnotCalloutMultiLine(double x1, double y1, double x2,
 
 AnnotQuadrilaterals::AnnotQuadrilaterals(Array *array, PDFRectangle *rect) {
   int arrayLength = array->getLength();
-  GBool correct = gTrue;
   int quadsLength = 0;
-  AnnotQuadrilateral **quads;
   double quadArray[8];
 
   // default values
-  quadrilaterals = NULL;
   quadrilateralsLength = 0;
 
   if ((arrayLength % 8) == 0) {
     int i;
 
     quadsLength = arrayLength / 8;
-    quads = (AnnotQuadrilateral **) gmallocn
-        ((quadsLength), sizeof(AnnotQuadrilateral *));
-    memset(quads, 0, quadsLength * sizeof(AnnotQuadrilateral *));
-
+    auto quads = std::make_unique<AnnotQuadrilateral[]>(quadsLength);
     for (i = 0; i < quadsLength; i++) {
       for (int j = 0; j < 8; j++) {
         Object obj = array->get(i * 8 + j);
         if (obj.isNum()) {
           quadArray[j] = obj.getNum();
         } else {
-            correct = gFalse;
 	    error (errSyntaxError, -1, "Invalid QuadPoint in annot");
-	    break;
+	    return;
         }
       }
 
-      if (!correct)
-        break;
-
-      quads[i] = new AnnotQuadrilateral(quadArray[0], quadArray[1],
-					quadArray[2], quadArray[3],
-					quadArray[4], quadArray[5],
-					quadArray[6], quadArray[7]);
+      quads[i] = AnnotQuadrilateral(quadArray[0], quadArray[1],
+                                    quadArray[2], quadArray[3],
+                                    quadArray[4], quadArray[5],
+                                    quadArray[6], quadArray[7]);
     }
 
-    if (correct) {
-      quadrilateralsLength = quadsLength;
-      quadrilaterals = quads;
-    } else {
-      for (int j = 0; j < i; j++)
-        delete quads[j];
-      gfree (quads);
-    }
+
+    quadrilateralsLength = quadsLength;
+    quadrilaterals = std::move(quads);
   }
 }
 
-AnnotQuadrilaterals::AnnotQuadrilaterals(AnnotQuadrilaterals::AnnotQuadrilateral **quads, int quadsLength) {
-  quadrilaterals = quads;
+AnnotQuadrilaterals::AnnotQuadrilaterals(std::unique_ptr<AnnotQuadrilateral[]> &&quads, int quadsLength) {
+  quadrilaterals = std::move(quads);
   quadrilateralsLength = quadsLength;
-}
-
-AnnotQuadrilaterals::~AnnotQuadrilaterals() {
-  if (quadrilaterals) {
-    for(int i = 0; i < quadrilateralsLength; i++)
-      delete quadrilaterals[i];
-
-    gfree (quadrilaterals);
-  }
 }
 
 double AnnotQuadrilaterals::getX1(int quadrilateral) {
   if (quadrilateral >= 0  && quadrilateral < quadrilateralsLength)
-    return quadrilaterals[quadrilateral]->coord1.getX();
+    return quadrilaterals[quadrilateral].coord1.getX();
   return 0;
 }
 
 double AnnotQuadrilaterals::getY1(int quadrilateral) {
   if (quadrilateral >= 0  && quadrilateral < quadrilateralsLength)
-    return quadrilaterals[quadrilateral]->coord1.getY();
+    return quadrilaterals[quadrilateral].coord1.getY();
   return 0;
 }
 
 double AnnotQuadrilaterals::getX2(int quadrilateral) {
   if (quadrilateral >= 0  && quadrilateral < quadrilateralsLength)
-    return quadrilaterals[quadrilateral]->coord2.getX();
+    return quadrilaterals[quadrilateral].coord2.getX();
   return 0;
 }
 
 double AnnotQuadrilaterals::getY2(int quadrilateral) {
   if (quadrilateral >= 0  && quadrilateral < quadrilateralsLength)
-    return quadrilaterals[quadrilateral]->coord2.getY();
+    return quadrilaterals[quadrilateral].coord2.getY();
   return 0;
 }
 
 double AnnotQuadrilaterals::getX3(int quadrilateral) {
   if (quadrilateral >= 0  && quadrilateral < quadrilateralsLength)
-    return quadrilaterals[quadrilateral]->coord3.getX();
+    return quadrilaterals[quadrilateral].coord3.getX();
   return 0;
 }
 
 double AnnotQuadrilaterals::getY3(int quadrilateral) {
   if (quadrilateral >= 0  && quadrilateral < quadrilateralsLength)
-    return quadrilaterals[quadrilateral]->coord3.getY();
+    return quadrilaterals[quadrilateral].coord3.getY();
   return 0;
 }
 
 double AnnotQuadrilaterals::getX4(int quadrilateral) {
   if (quadrilateral >= 0  && quadrilateral < quadrilateralsLength)
-    return quadrilaterals[quadrilateral]->coord4.getX();
+    return quadrilaterals[quadrilateral].coord4.getX();
   return 0;
 }
 
 double AnnotQuadrilaterals::getY4(int quadrilateral) {
   if (quadrilateral >= 0  && quadrilateral < quadrilateralsLength)
-    return quadrilaterals[quadrilateral]->coord4.getY();
+    return quadrilaterals[quadrilateral].coord4.getY();
   return 0;
 }
 
@@ -890,12 +846,11 @@ Object AnnotAppearance::getAppearanceStream(AnnotAppearanceType type, const char
   return res;
 }
 
-GooString * AnnotAppearance::getStateKey(int i) {
-  GooString * res = NULL;
+std::unique_ptr<GooString> AnnotAppearance::getStateKey(int i) {
   Object obj1 = appearDict.dictLookupNF("N");
   if (obj1.isDict())
-    res = new GooString(obj1.dictGetKey(i));
-  return res;
+    return std::make_unique<GooString>(obj1.dictGetKey(i));
+  return nullptr;
 }
 
 int AnnotAppearance::getNumStates() {
@@ -1015,52 +970,36 @@ AnnotAppearanceCharacs::AnnotAppearanceCharacs(Dict *dict) {
   if (obj1.isArray()) {
     Array *colorComponents = obj1.getArray();
     if (colorComponents->getLength() > 0) {
-      borderColor = new AnnotColor(colorComponents);
-    } else {
-      borderColor = NULL;
+      borderColor = std::make_unique<AnnotColor>(colorComponents);
     }
-  } else {
-    borderColor = NULL;
   }
 
   obj1 = dict->lookup("BG");
   if (obj1.isArray()) {
     Array *colorComponents = obj1.getArray();
     if (colorComponents->getLength() > 0) {
-      backColor = new AnnotColor(colorComponents);
-    } else {
-      backColor = NULL;
+      backColor = std::make_unique<AnnotColor>(colorComponents);
     }
-  } else {
-    backColor = NULL;
   }
 
   obj1 = dict->lookup("CA");
   if (obj1.isString()) {
-    normalCaption = new GooString(obj1.getString());
-  } else {
-    normalCaption = NULL;
+    normalCaption = std::make_unique<GooString>(obj1.getString());
   }
 
   obj1 = dict->lookup("RC");
   if (obj1.isString()) {
-    rolloverCaption = new GooString(obj1.getString());
-  } else {
-    rolloverCaption = NULL;
+    rolloverCaption = std::make_unique<GooString>(obj1.getString());
   }
 
   obj1 = dict->lookup("AC");
   if (obj1.isString()) {
-    alternateCaption = new GooString(obj1.getString());
-  } else {
-    alternateCaption = NULL;
+    alternateCaption = std::make_unique<GooString>(obj1.getString());
   }
 
   obj1 = dict->lookup("IF");
   if (obj1.isDict()) {
-    iconFit = new AnnotIconFit(obj1.getDict());
-  } else {
-    iconFit = NULL;
+    iconFit = std::make_unique<AnnotIconFit>(obj1.getDict());
   }
 
   obj1 = dict->lookup("TP");
@@ -1069,26 +1008,6 @@ AnnotAppearanceCharacs::AnnotAppearanceCharacs(Dict *dict) {
   } else {
     position = captionNoIcon;
   }
-}
-
-AnnotAppearanceCharacs::~AnnotAppearanceCharacs() {
-  if (borderColor)
-    delete borderColor;
-
-  if (backColor)
-    delete backColor;
-
-  if (normalCaption)
-    delete normalCaption;
-
-  if (rolloverCaption)
-    delete rolloverCaption;
-
-  if (alternateCaption)
-    delete alternateCaption;
-
-  if (iconFit)
-    delete iconFit;
 }
 
 //------------------------------------------------------------------------
@@ -1197,16 +1116,12 @@ void Annot::initialize(PDFDoc *docA, Dict *dict) {
   ok = gTrue;
   doc = docA;
   xref = doc->getXRef();
-  appearStreams = NULL;
-  appearBBox = NULL;
-  appearState = NULL;
-  appearBuf = NULL;
   fontSize = 0;
 
   appearance.setToNull();
 
   //----- parse the rectangle
-  rect = new PDFRectangle();
+  rect = std::make_unique<PDFRectangle>();
   obj1 = dict->lookup("Rect");
   if (obj1.isArray() && obj1.arrayGetLength() == 4) {
     Object obj2;
@@ -1235,9 +1150,9 @@ void Annot::initialize(PDFDoc *docA, Dict *dict) {
 
   obj1 = dict->lookup("Contents");
   if (obj1.isString()) {
-    contents = obj1.getString()->copy();
+    contents.reset(obj1.getString()->copy());
   } else {
-    contents = new GooString();
+    contents = std::make_unique<GooString>();
   }
 
   // Note: This value is overwritten by Annots ctor
@@ -1252,16 +1167,12 @@ void Annot::initialize(PDFDoc *docA, Dict *dict) {
 
   obj1 = dict->lookup("NM");
   if (obj1.isString()) {
-    name = obj1.getString()->copy();
-  } else {
-    name = NULL;
+    name.reset(obj1.getString()->copy());
   }
 
   obj1 = dict->lookup("M");
   if (obj1.isString()) {
-    modified = obj1.getString()->copy();
-  } else {
-    modified = NULL;
+    modified.reset(obj1.getString()->copy());
   }
 
   //----- get the flags
@@ -1275,13 +1186,13 @@ void Annot::initialize(PDFDoc *docA, Dict *dict) {
   //----- get the annotation appearance dictionary
   apObj = dict->lookup("AP");
   if (apObj.isDict()) {
-    appearStreams = new AnnotAppearance(doc, &apObj);
+    appearStreams = std::make_unique<AnnotAppearance>(doc, &apObj);
   }
 
   //----- get the appearance state
   asObj = dict->lookup("AS");
   if (asObj.isName()) {
-    appearState = new GooString(asObj.getName());
+    appearState = std::make_unique<GooString>(asObj.getName());
   } else if (appearStreams && appearStreams->getNumStates() != 0) {
     error (errSyntaxError, -1, "Invalid or missing AS value in annotation containing one or more appearance subdictionaries");
     // AS value is required in this case, but if the
@@ -1292,7 +1203,7 @@ void Annot::initialize(PDFDoc *docA, Dict *dict) {
     }
   }
   if (!appearState) {
-    appearState = new GooString("Off");
+    appearState = std::make_unique<GooString>("Off");
   }
 
   //----- get the annotation appearance
@@ -1306,16 +1217,13 @@ void Annot::initialize(PDFDoc *docA, Dict *dict) {
   // seems to ignore the Border entry for annots that can't have a BS entry. So, we only
   // follow this rule for annots tha can have a BS entry.
   obj1 = dict->lookup("Border");
-  if (obj1.isArray())
-    border = new AnnotBorderArray(obj1.getArray());
-  else
-    border = NULL;
+  if (obj1.isArray()) {
+    border = std::make_unique<AnnotBorderArray>(obj1.getArray());
+  }
 
   obj1 = dict->lookup("C");
   if (obj1.isArray()) {
-    color = new AnnotColor(obj1.getArray());
-  } else {
-    color = NULL;
+    color = std::make_unique<AnnotColor>(obj1.getArray());
   }
 
   obj1 = dict->lookup("StructParent");
@@ -1378,8 +1286,7 @@ void Annot::update(const char *key, Object &&value) {
   annotLocker();
   /* Set M to current time, unless we are updating M itself */
   if (strcmp(key, "M") != 0) {
-    delete modified;
-    modified = timeToDateString(NULL);
+    modified.reset(timeToDateString(nullptr));
 
     annotObj.dictSet("M", Object(modified->copy()));
   }
@@ -1391,17 +1298,16 @@ void Annot::update(const char *key, Object &&value) {
 
 void Annot::setContents(GooString *new_content) {
   annotLocker();
-  delete contents;
 
   if (new_content) {
-    contents = new GooString(new_content);
+    contents = std::make_unique<GooString>(new_content);
     //append the unicode marker <FE FF> if needed	
     if (!contents->hasUnicodeMarker()) {
       contents->insert(0, 0xff);
       contents->insert(0, 0xfe);
     }
   } else {
-    contents = new GooString();
+    contents = std::make_unique<GooString>();
   }
   
   update ("Contents", Object(contents->copy()));
@@ -1409,12 +1315,11 @@ void Annot::setContents(GooString *new_content) {
 
 void Annot::setName(GooString *new_name) {
   annotLocker();
-  delete name;
 
   if (new_name) {
-    name = new GooString(new_name);
+    name = std::make_unique<GooString>(new_name);
   } else {
-    name = new GooString();
+    name = std::make_unique<GooString>();
   }
 
   update ("NM", Object(name->copy()));
@@ -1422,12 +1327,11 @@ void Annot::setName(GooString *new_name) {
 
 void Annot::setModified(GooString *new_modified) {
   annotLocker();
-  delete modified;
 
   if (new_modified)
-    modified = new GooString(new_modified);
+    modified = std::make_unique<GooString>(new_modified);
   else
-    modified = new GooString();
+    modified = std::make_unique<GooString>();
 
   update ("M", Object(modified->copy()));
 }
@@ -1438,30 +1342,28 @@ void Annot::setFlags(Guint new_flags) {
   update ("F", Object(int(flags)));
 }
 
-void Annot::setBorder(AnnotBorder *new_border) {
+void Annot::setBorder(std::unique_ptr<AnnotBorder> &&new_border) {
   annotLocker();
-  delete border;
 
   if (new_border) {
     Object obj1 = new_border->writeToObject(xref);
     update(new_border->getType() == AnnotBorder::typeArray ? "Border" : "BS", std::move(obj1));
-    border = new_border;
+    border = std::move(new_border);
   } else {
-    border = NULL;
+    border = nullptr;
   }
   invalidateAppearance();
 }
 
-void Annot::setColor(AnnotColor *new_color) {
+void Annot::setColor(std::unique_ptr<AnnotColor> &&new_color) {
   annotLocker();
-  delete color;
 
   if (new_color) {
     Object obj1 = new_color->writeToObject(xref);
     update ("C", std::move(obj1));
-    color = new_color;
+    color = std::move(new_color);
   } else {
-    color = NULL;
+    color = nullptr;
   }
   invalidateAppearance();
 }
@@ -1489,11 +1391,8 @@ void Annot::setAppearanceState(const char *state) {
   if (!state)
     return;
 
-  delete appearState;
-  appearState = new GooString(state);
-
-  delete appearBBox;
-  appearBBox = NULL;
+  appearState = std::make_unique<GooString>(state);
+  appearBBox = nullptr;
 
   update ("AS", Object(objName, state));
 
@@ -1510,15 +1409,9 @@ void Annot::invalidateAppearance() {
   if (appearStreams) { // Remove existing appearance streams
     appearStreams->removeAllStreams();
   }
-  delete appearStreams;
-  appearStreams = NULL;
-
-  delete appearState;
-  appearState = NULL;
-
-  delete appearBBox;
-  appearBBox = NULL;
-
+  appearStreams = nullptr;
+  appearState = nullptr;
+  appearBBox = nullptr;
   appearance.setToNull();
 
   Object obj2 = annotObj.dictLookup("AP");
@@ -1583,27 +1476,6 @@ void Annot::decRefCnt() {
 }
 
 Annot::~Annot() {
-  delete rect;
-  delete contents;
-
-  if (name)
-    delete name;
-
-  if (modified)
-    delete modified;
-
-  delete appearStreams;
-  delete appearBBox;
-
-  if (appearState)
-    delete appearState;
-
-  if (border)
-    delete border;
-
-  if (color)
-    delete color;
-
 #if MULTITHREADED
     gDestroyMutex(&mutex);
 #endif
@@ -1827,7 +1699,7 @@ void Annot::draw(Gfx *gfx, GBool printing) {
 
   // draw the appearance stream
   Object obj = appearance.fetch(gfx->getXRef());
-  gfx->drawAnnot(&obj, (AnnotBorder *)NULL, color,
+  gfx->drawAnnot(&obj, (AnnotBorder *)NULL, color.get(),
       rect->x1, rect->y1, rect->x2, rect->y2, getRotation());
 }
 
@@ -1895,36 +1767,18 @@ AnnotMarkup::AnnotMarkup(PDFDoc *docA, Object *dictObject, Object *obj) :
   initialize(docA, dictObject->getDict(), obj);
 }
 
-AnnotMarkup::~AnnotMarkup() {
-  if (label)
-    delete label;
-
-  if (popup)
-    delete popup;
-
-  if (date)
-    delete date;
-
-  if (subject)
-    delete subject;
-}
-
 void AnnotMarkup::initialize(PDFDoc *docA, Dict *dict, Object *obj) {
   Object obj1, obj2;
 
   obj1 = dict->lookup("T");
   if (obj1.isString()) {
-    label = obj1.getString()->copy();
-  } else {
-    label = NULL;
+    label.reset(obj1.getString()->copy());
   }
 
   obj1 = dict->lookup("Popup");
   obj2 = dict->lookupNF("Popup");
   if (obj1.isDict() && obj2.isRef()) {
-    popup = new AnnotPopup(docA, &obj1, &obj2);
-  } else {
-    popup = NULL;
+    popup = std::make_unique<AnnotPopup>(docA, &obj1, &obj2);
   }
 
   obj1 = dict->lookup("CA");
@@ -1936,9 +1790,7 @@ void AnnotMarkup::initialize(PDFDoc *docA, Dict *dict, Object *obj) {
 
   obj1 = dict->lookup("CreationDate");
   if (obj1.isString()) {
-    date = obj1.getString()->copy();
-  } else {
-    date = NULL;
+    date.reset(obj1.getString()->copy());
   }
 
   obj1 = dict->lookupNF("IRT");
@@ -1951,9 +1803,7 @@ void AnnotMarkup::initialize(PDFDoc *docA, Dict *dict, Object *obj) {
 
   obj1 = dict->lookup("Subj");
   if (obj1.isString()) {
-    subject = obj1.getString()->copy();
-  } else {
-    subject = NULL;
+    subject.reset(obj1.getString()->copy());
   }
 
   obj1 = dict->lookup("RT");
@@ -1980,41 +1830,38 @@ void AnnotMarkup::initialize(PDFDoc *docA, Dict *dict, Object *obj) {
 }
 
 void AnnotMarkup::setLabel(GooString *new_label) {
-  delete label;
-
   if (new_label) {
-    label = new GooString(new_label);
+    label = std::make_unique<GooString>(new_label);
     //append the unicode marker <FE FF> if needed
     if (!label->hasUnicodeMarker()) {
       label->insert(0, 0xff);
       label->insert(0, 0xfe);
     }
   } else {
-    label = new GooString();
+    label = std::make_unique<GooString>();
   }
 
   update ("T", Object(label->copy()));
 }
 
-void AnnotMarkup::setPopup(AnnotPopup *new_popup) {
+void AnnotMarkup::setPopup(std::unique_ptr<AnnotPopup> &&new_popup) {
   // If there exists an old popup annotation that is already
   // associated with a page, then we need to remove that
   // popup annotation from the page. Otherwise we would have
   // dangling references to it.
-  if (popup != NULL && popup->getPageNum() != 0) {
+  if (popup && popup->getPageNum() != 0) {
     Page *pageobj = doc->getPage(popup->getPageNum());
     if (pageobj) {
-      pageobj->removeAnnot(popup);
+      pageobj->removeAnnot(popup.get());
     }
   }
-  delete popup;
 
   if (new_popup) {
     const Ref popupRef = new_popup->getRef();
     update ("Popup", Object(popupRef.num, popupRef.gen));
 
     new_popup->setParent(this);
-    popup = new_popup;
+    popup = std::move(new_popup);
 
     // If this annotation is already added to a page, then we
     // add the new popup annotation to the same page.
@@ -2022,10 +1869,10 @@ void AnnotMarkup::setPopup(AnnotPopup *new_popup) {
       Page *pageobj = doc->getPage(page);
       assert(pageobj != NULL); // pageobj should exist in doc (see setPage())
 
-      pageobj->addAnnot(popup);
+      pageobj->addAnnot(popup.get());
     }
   } else {
-    popup = NULL;
+    popup = nullptr;
   }
 }
 
@@ -2036,12 +1883,10 @@ void AnnotMarkup::setOpacity(double opacityA) {
 }
 
 void AnnotMarkup::setDate(GooString *new_date) {
-  delete date;
-
   if (new_date)
-    date = new GooString(new_date);
+    date = std::make_unique<GooString>(new_date);
   else
-    date = new GooString();
+    date = std::make_unique<GooString>();
 
   update ("CreationDate", Object(date->copy()));
 }
@@ -2052,7 +1897,7 @@ void AnnotMarkup::removeReferencedObjects() {
 
   // Remove popup
   if (popup) {
-    pageobj->removeAnnot(popup);
+    pageobj->removeAnnot(popup.get());
   }
 
   Annot::removeReferencedObjects();
@@ -2079,10 +1924,6 @@ AnnotText::AnnotText(PDFDoc *docA, Object *dictObject, Object *obj) :
   initialize (docA, dictObject->getDict());
 }
 
-AnnotText::~AnnotText() {
-  delete icon;
-}
-
 void AnnotText::initialize(PDFDoc *docA, Dict *dict) {
   Object obj1;
 
@@ -2094,9 +1935,9 @@ void AnnotText::initialize(PDFDoc *docA, Dict *dict) {
 
   obj1 = dict->lookup("Name");
   if (obj1.isName()) {
-    icon = new GooString(obj1.getName());
+    icon = std::make_unique<GooString>(obj1.getName());
   } else {
-    icon = new GooString("Note");
+    icon = std::make_unique<GooString>("Note");
   }
 
   obj1 = dict->lookup("StateModel");
@@ -2174,12 +2015,10 @@ void AnnotText::setIcon(GooString *new_icon) {
   if (new_icon && icon->cmp(new_icon) == 0)
     return;
 
-  delete icon;
-
   if (new_icon) {
-    icon = new GooString (new_icon);
+    icon = std::make_unique<GooString>(new_icon);
   } else {
-    icon = new GooString("Note");
+    icon = std::make_unique<GooString>("Note");
   }
 
   update("Name", Object(objName, icon->getCString()));
@@ -2440,11 +2279,11 @@ void AnnotText::draw(Gfx *gfx, GBool printing) {
   if (appearance.isNull()) {
     ca = opacity;
 
-    appearBuf = new GooString ();
+    appearBuf = std::make_unique<GooString>();
 
     appearBuf->append ("q\n");
     if (color)
-      setColor(color, gTrue);
+      setColor(color.get(), gTrue);
     else
       appearBuf->append ("1 1 1 rg\n");
     if (!icon->cmp("Note"))
@@ -2469,31 +2308,29 @@ void AnnotText::draw(Gfx *gfx, GBool printing) {
 
     // Force 24x24 rectangle
     PDFRectangle fixedRect(rect->x1, rect->y2 - 24, rect->x1 + 24, rect->y2);
-    appearBBox = new AnnotAppearanceBBox(&fixedRect);
+    appearBBox = std::make_unique<AnnotAppearanceBBox>(&fixedRect);
     double bbox[4];
     appearBBox->getBBoxRect(bbox);
     if (ca == 1) {
       appearance = createForm(bbox, gFalse, nullptr);
     } else {
       Object aStream = createForm(bbox, gTrue, nullptr);
-      delete appearBuf;
-
-      appearBuf = new GooString ("/GS0 gs\n/Fm0 Do");
+      appearBuf = std::make_unique<GooString>("/GS0 gs\n/Fm0 Do");
       Dict *resDict = createResourcesDict("Fm0", std::move(aStream), "GS0", ca, NULL);
       appearance = createForm(bbox, gFalse, resDict);
     }
-    delete appearBuf;
+    appearBuf = nullptr;
   }
 
   // draw the appearance stream
   Object obj = appearance.fetch(gfx->getXRef());
   if (appearBBox) {
-    gfx->drawAnnot(&obj, (AnnotBorder *)NULL, color,
+    gfx->drawAnnot(&obj, (AnnotBorder *)NULL, color.get(),
                    appearBBox->getPageXMin(), appearBBox->getPageYMin(),
                    appearBBox->getPageXMax(), appearBBox->getPageYMax(),
                    getRotation());
   } else {
-    gfx->drawAnnot(&obj, (AnnotBorder *)NULL, color,
+    gfx->drawAnnot(&obj, (AnnotBorder *)NULL, color.get(),
                    rect->x1, rect->y1, rect->x2, rect->y2, getRotation());
   }
 }
@@ -2517,30 +2354,18 @@ AnnotLink::AnnotLink(PDFDoc *docA, Object *dictObject, Object *obj) :
   initialize (docA, dictObject->getDict());
 }
 
-AnnotLink::~AnnotLink() {
-  delete action;
-  /*
-  if (uriAction)
-    delete uriAction;
-  */
-  if (quadrilaterals)
-    delete quadrilaterals;
-}
-
 void AnnotLink::initialize(PDFDoc *docA, Dict *dict) {
   Object obj1;
-
-  action = NULL;
 
   // look for destination
   obj1 = dict->lookup("Dest");
   if (!obj1.isNull()) {
-    action = LinkAction::parseDest(&obj1);
+    action.reset(LinkAction::parseDest(&obj1));
   // look for action
   } else {
     obj1 = dict->lookup("A");
     if (obj1.isDict()) {
-      action = LinkAction::parseAction(&obj1, doc->getCatalog()->getBaseURI());
+      action.reset(LinkAction::parseAction(&obj1, doc->getCatalog()->getBaseURI()));
     }
   }
 
@@ -2573,17 +2398,14 @@ void AnnotLink::initialize(PDFDoc *docA, Dict *dict) {
   */
   obj1 = dict->lookup("QuadPoints");
   if (obj1.isArray()) {
-    quadrilaterals = new AnnotQuadrilaterals(obj1.getArray(), rect);
-  } else {
-    quadrilaterals = NULL;
+    quadrilaterals = std::make_unique<AnnotQuadrilaterals>(obj1.getArray(), rect.get());
   }
 
   obj1 = dict->lookup("BS");
   if (obj1.isDict()) {
-    delete border;
-    border = new AnnotBorderBS(obj1.getDict());
+    border = std::make_unique<AnnotBorderBS>(obj1.getDict());
   } else if (!border) {
-    border = new AnnotBorderBS();
+    border = std::make_unique<AnnotBorderBS>();
   }
 }
 
@@ -2594,7 +2416,7 @@ void AnnotLink::draw(Gfx *gfx, GBool printing) {
   annotLocker();
   // draw the appearance stream
   Object obj = appearance.fetch(gfx->getXRef());
-  gfx->drawAnnot(&obj, border, color,
+  gfx->drawAnnot(&obj, border.get(), color.get(),
 		 rect->x1, rect->y1, rect->x2, rect->y2, getRotation());
 }
 
@@ -2619,30 +2441,14 @@ AnnotFreeText::AnnotFreeText(PDFDoc *docA, Object *dictObject, Object *obj) :
   initialize(docA, dictObject->getDict());
 }
 
-AnnotFreeText::~AnnotFreeText() {
-  delete appearanceString;
-
-  if (styleString)
-    delete styleString;
-
-  if (calloutLine)
-    delete calloutLine;
-
-  if (borderEffect)
-    delete borderEffect;
-
-  if (rectangle)
-    delete rectangle;
-}
-
 void AnnotFreeText::initialize(PDFDoc *docA, Dict *dict) {
   Object obj1;
 
   obj1 = dict->lookup("DA");
   if (obj1.isString()) {
-    appearanceString = obj1.getString()->copy();
+    appearanceString.reset(obj1.getString()->copy());
   } else {
-    appearanceString = new GooString();
+    appearanceString = std::make_unique<GooString>();
     error(errSyntaxError, -1, "Bad appearance for annotation");
     ok = gFalse;
   }
@@ -2656,9 +2462,7 @@ void AnnotFreeText::initialize(PDFDoc *docA, Dict *dict) {
 
   obj1 = dict->lookup("DS");
   if (obj1.isString()) {
-    styleString = obj1.getString()->copy();
-  } else {
-    styleString = NULL;
+    styleString.reset(obj1.getString()->copy());
   }
 
   obj1 = dict->lookup("CL");
@@ -2675,12 +2479,10 @@ void AnnotFreeText::initialize(PDFDoc *docA, Dict *dict) {
       double x3, y3;
       (obj2 = obj1.arrayGet(4), obj2.isNum() ? x3 = obj2.getNum() : x3 = 0);
       (obj2 = obj1.arrayGet(5), obj2.isNum() ? y3 = obj2.getNum() : y3 = 0);
-      calloutLine = new AnnotCalloutMultiLine(x1, y1, x2, y2, x3, y3);
+      calloutLine = std::make_unique<AnnotCalloutMultiLine>(x1, y1, x2, y2, x3, y3);
     } else {
-      calloutLine = new AnnotCalloutLine(x1, y1, x2, y2);
+      calloutLine = std::make_unique<AnnotCalloutLine>(x1, y1, x2, y2);
     }
-  } else {
-    calloutLine = NULL;
   }
 
   obj1 = dict->lookup("IT");
@@ -2702,24 +2504,19 @@ void AnnotFreeText::initialize(PDFDoc *docA, Dict *dict) {
 
   obj1 = dict->lookup("BS");
   if (obj1.isDict()) {
-    delete border;
-    border = new AnnotBorderBS(obj1.getDict());
+    border = std::make_unique<AnnotBorderBS>(obj1.getDict());
   } else if (!border) {
-    border = new AnnotBorderBS();
+    border = std::make_unique<AnnotBorderBS>();
   }
 
   obj1 = dict->lookup("BE");
   if (obj1.isDict()) {
-    borderEffect = new AnnotBorderEffect(obj1.getDict());
-  } else {
-    borderEffect = NULL;
+    borderEffect = std::make_unique<AnnotBorderEffect>(obj1.getDict());
   }
 
   obj1 = dict->lookup("RD");
   if (obj1.isArray()) {
-    rectangle = parseDiffRectangle(obj1.getArray(), rect);
-  } else {
-    rectangle = NULL;
+    rectangle = parseDiffRectangle(obj1.getArray(), rect.get());
   }
 
   obj1 = dict->lookup("LE");
@@ -2737,12 +2534,10 @@ void AnnotFreeText::setContents(GooString *new_content) {
 }
 
 void AnnotFreeText::setAppearanceString(GooString *new_string) {
-  delete appearanceString;
-
   if (new_string) {
-    appearanceString = new GooString(new_string);
+    appearanceString = std::make_unique<GooString>(new_string);
   } else {
-    appearanceString = new GooString();
+    appearanceString = std::make_unique<GooString>();
   }
 
   update ("DA", Object(appearanceString->copy()));
@@ -2757,29 +2552,25 @@ void AnnotFreeText::setQuadding(AnnotFreeTextQuadding new_quadding) {
 }
 
 void AnnotFreeText::setStyleString(GooString *new_string) {
-  delete styleString;
-
   if (new_string) {
-    styleString = new GooString(new_string);
+    styleString = std::make_unique<GooString>(new_string);
     //append the unicode marker <FE FF> if needed
     if (!styleString->hasUnicodeMarker()) {
       styleString->insert(0, 0xff);
       styleString->insert(0, 0xfe);
     }
   } else {
-    styleString = new GooString();
+    styleString = std::make_unique<GooString>();
   }
 
   update ("DS", Object(styleString->copy()));
 }
 
 void AnnotFreeText::setCalloutLine(AnnotCalloutLine *line) {
-  delete calloutLine;
-
   Object obj1;
   if (line == NULL) {
     obj1.setToNull();
-    calloutLine = NULL;
+    calloutLine = nullptr;
   } else {
     double x1 = line->getX1(), y1 = line->getY1();
     double x2 = line->getX2(), y2 = line->getY2();
@@ -2794,9 +2585,9 @@ void AnnotFreeText::setCalloutLine(AnnotCalloutLine *line) {
       double x3 = mline->getX3(), y3 = mline->getY3();
       obj1.arrayAdd( Object(x3) );
       obj1.arrayAdd( Object(y3) );
-      calloutLine = new AnnotCalloutMultiLine(x1, y1, x2, y2, x3, y3);
+      calloutLine = std::make_unique<AnnotCalloutMultiLine>(x1, y1, x2, y2, x3, y3);
     } else {
-      calloutLine = new AnnotCalloutLine(x1, y1, x2, y2);
+      calloutLine = std::make_unique<AnnotCalloutLine>(x1, y1, x2, y2);
     }
   }
 
@@ -2834,9 +2625,9 @@ static GfxFont * createAnnotDrawFont(XRef * xref, Dict *fontResDict)
   return GfxFont::makeFont(xref, "AnnotDrawFont", dummyRef, fontDict);
 }
 
-void AnnotFreeText::parseAppearanceString(GooString *da, double &fontsize, AnnotColor* &fontcolor) {
+void AnnotFreeText::parseAppearanceString(GooString *da, double &fontsize, std::unique_ptr<AnnotColor> &fontcolor) {
   fontsize = -1;
-  fontcolor = NULL;
+
   if (da) {
     GooList * daToks = new GooList();
     int j, i = 0;
@@ -2862,18 +2653,18 @@ void AnnotFreeText::parseAppearanceString(GooString *da, double &fontsize, Annot
             fontsize = gatof(( (GooString *)daToks->get(i-1) )->getCString());
         }
       }
-      if (fontcolor == NULL) {
+      if (!fontcolor) {
         if (!((GooString *)daToks->get(i))->cmp("g") && i >= 1) {
-          fontcolor = new AnnotColor(gatof(( (GooString *)daToks->get(i-1) )->getCString()));
+          fontcolor = std::make_unique<AnnotColor>(gatof(( (GooString *)daToks->get(i-1) )->getCString()));
         } else if (!((GooString *)daToks->get(i))->cmp("rg") && i >= 3) {
-          fontcolor = new AnnotColor(gatof(( (GooString *)daToks->get(i-3) )->getCString()),
-                                     gatof(( (GooString *)daToks->get(i-2) )->getCString()),
-                                     gatof(( (GooString *)daToks->get(i-1) )->getCString()));
+          fontcolor = std::make_unique<AnnotColor>(gatof(( (GooString *)daToks->get(i-3) )->getCString()),
+                                                   gatof(( (GooString *)daToks->get(i-2) )->getCString()),
+                                                   gatof(( (GooString *)daToks->get(i-1) )->getCString()));
         } else if (!((GooString *)daToks->get(i))->cmp("k") && i >= 4) {
-          fontcolor = new AnnotColor(gatof(( (GooString *)daToks->get(i-4) )->getCString()),
-                                     gatof(( (GooString *)daToks->get(i-3) )->getCString()),
-                                     gatof(( (GooString *)daToks->get(i-2) )->getCString()),
-                                     gatof(( (GooString *)daToks->get(i-1) )->getCString()));
+          fontcolor = std::make_unique<AnnotColor>(gatof(( (GooString *)daToks->get(i-4) )->getCString()),
+                                                   gatof(( (GooString *)daToks->get(i-3) )->getCString()),
+                                                   gatof(( (GooString *)daToks->get(i-2) )->getCString()),
+                                                   gatof(( (GooString *)daToks->get(i-1) )->getCString()));
         }
       }
     }
@@ -2885,12 +2676,12 @@ void AnnotFreeText::generateFreeTextAppearance()
 {
   double borderWidth, ca = opacity;
 
-  appearBuf = new GooString ();
+  appearBuf = std::make_unique<GooString>();
   appearBuf->append ("q\n");
 
   borderWidth = border->getWidth();
   if (borderWidth > 0)
-    setLineStyleForBorder(border);
+    setLineStyleForBorder(border.get());
 
   // Box size
   const double width = rect->x2 - rect->x1;
@@ -2898,26 +2689,26 @@ void AnnotFreeText::generateFreeTextAppearance()
 
   // Parse some properties from the appearance string
   double fontsize;
-  AnnotColor *fontcolor;
-  parseAppearanceString(appearanceString, fontsize, fontcolor);
+  std::unique_ptr<AnnotColor> fontcolor;
+  parseAppearanceString(appearanceString.get(), fontsize, fontcolor);
   // Default values
   if (fontsize <= 0)
     fontsize = 10;
-  if (fontcolor == NULL)
-    fontcolor = new AnnotColor(0, 0, 0); // Black
+  if (!fontcolor)
+    fontcolor = std::make_unique<AnnotColor>(0, 0, 0); // Black
   if (!contents)
-    contents = new GooString ();
+    contents = std::make_unique<GooString>();
 
   // Draw box
   GBool doFill = (color && color->getSpace() != AnnotColor::colorTransparent);
   GBool doStroke = (borderWidth != 0);
   if (doFill || doStroke) {
     if (doStroke) {
-      setColor(fontcolor, gFalse); // Border color: same as font color
+      setColor(fontcolor.get(), gFalse); // Border color: same as font color
     }
     appearBuf->appendf ("{0:.2f} {0:.2f} {1:.2f} {2:.2f} re\n", borderWidth/2, width-borderWidth, height-borderWidth);
     if (doFill) {
-      setColor(color, gTrue);
+      setColor(color.get(), gTrue);
       appearBuf->append(doStroke ? "B\n" : "f\n");
     } else {
       appearBuf->append("S\n");
@@ -2933,7 +2724,7 @@ void AnnotFreeText::generateFreeTextAppearance()
   GfxFont *font = createAnnotDrawFont(xref, fontResDict);
 
   // Set font state
-  setColor(fontcolor, gTrue);
+  setColor(fontcolor.get(), gTrue);
   appearBuf->appendf ("BT 1 0 0 1 {0:.2f} {1:.2f} Tm\n", textmargin, height - textmargin - fontsize * font->getDescent());
   appearBuf->appendf ("/AnnotDrawFont {0:.2f} Tf\n", fontsize);
 
@@ -2942,7 +2733,7 @@ void AnnotFreeText::generateFreeTextAppearance()
   while (i < contents->getLength()) {
     GooString out;
     double linewidth, xpos;
-    layoutText(contents, &out, &i, font, &linewidth, textwidth/fontsize, NULL, gFalse);
+    layoutText(contents.get(), &out, &i, font, &linewidth, textwidth/fontsize, NULL, gFalse);
     linewidth *= fontsize;
     switch (quadding) {
     case quaddingCentered:
@@ -2956,13 +2747,13 @@ void AnnotFreeText::generateFreeTextAppearance()
       break;
     }
     appearBuf->appendf("{0:.2f} {1:.2f} Td\n", xpos - xposPrev, -fontsize);
-    writeString(&out, appearBuf);
+    writeString(&out, appearBuf.get());
     appearBuf->append("Tj\n");
     xposPrev = xpos;
   }
 
   font->decRefCnt();
-  delete fontcolor;
+  fontcolor = nullptr;
   appearBuf->append ("ET Q\n");
 
   double bbox[4];
@@ -2974,13 +2765,11 @@ void AnnotFreeText::generateFreeTextAppearance()
     appearance = createForm(bbox, gFalse, fontResDict);
   } else {
     Object aStream = createForm(bbox, gTrue, fontResDict);
-    delete appearBuf;
-
-    appearBuf = new GooString ("/GS0 gs\n/Fm0 Do");
+    appearBuf = std::make_unique<GooString>("/GS0 gs\n/Fm0 Do");
     Dict *resDict = createResourcesDict("Fm0", std::move(aStream), "GS0", ca, NULL);
     appearance = createForm(bbox, gFalse, resDict);
   }
-  delete appearBuf;
+  appearBuf = nullptr;
 }
 
 void AnnotFreeText::draw(Gfx *gfx, GBool printing) {
@@ -2994,7 +2783,7 @@ void AnnotFreeText::draw(Gfx *gfx, GBool printing) {
 
   // draw the appearance stream
   Object obj = appearance.fetch(gfx->getXRef());
-  gfx->drawAnnot(&obj, (AnnotBorder *)NULL, color,
+  gfx->drawAnnot(&obj, (AnnotBorder *)NULL, color.get(),
                  rect->x1, rect->y1, rect->x2, rect->y2, getRotation());
 }
 
@@ -3027,17 +2816,6 @@ AnnotLine::AnnotLine(PDFDoc *docA, Object *dictObject, Object *obj) :
   initialize(docA, dictObject->getDict());
 }
 
-AnnotLine::~AnnotLine() {
-  delete coord1;
-  delete coord2;
-
-  if (interiorColor)
-    delete interiorColor;
-
-  if (measure)
-    delete measure;
-}
-
 void AnnotLine::initialize(PDFDoc *docA, Dict *dict) {
   Object obj1;
 
@@ -3051,11 +2829,11 @@ void AnnotLine::initialize(PDFDoc *docA, Dict *dict) {
     (obj2 = obj1.arrayGet(2), obj2.isNum() ? x2 = obj2.getNum() : x2 = 0);
     (obj2 = obj1.arrayGet(3), obj2.isNum() ? y2 = obj2.getNum() : y2 = 0);
 
-    coord1 = new AnnotCoord(x1, y1);
-    coord2 = new AnnotCoord(x2, y2);
+    coord1 = std::make_unique<AnnotCoord>(x1, y1);
+    coord2 = std::make_unique<AnnotCoord>(x2, y2);
   } else {
-    coord1 = new AnnotCoord();
-    coord2 = new AnnotCoord();
+    coord1 = std::make_unique<AnnotCoord>();
+    coord2 = std::make_unique<AnnotCoord>();
   }
 
   obj1 = dict->lookup("LE");
@@ -3080,9 +2858,7 @@ void AnnotLine::initialize(PDFDoc *docA, Dict *dict) {
 
   obj1 = dict->lookup("IC");
   if (obj1.isArray()) {
-    interiorColor = new AnnotColor(obj1.getArray());
-  } else {
-    interiorColor = NULL;
+    interiorColor = std::make_unique<AnnotColor>(obj1.getArray());
   }
 
   obj1 = dict->lookup("LL");
@@ -3170,10 +2946,9 @@ void AnnotLine::initialize(PDFDoc *docA, Dict *dict) {
 
   obj1 = dict->lookup("BS");
   if (obj1.isDict()) {
-    delete border;
-    border = new AnnotBorderBS(obj1.getDict());
+    border = std::make_unique<AnnotBorderBS>(obj1.getDict());
   } else if (!border) {
-    border = new AnnotBorderBS();
+    border = std::make_unique<AnnotBorderBS>();
   }
 }
 
@@ -3184,10 +2959,8 @@ void AnnotLine::setContents(GooString *new_content) {
 }
 
 void AnnotLine::setVertices(double x1, double y1, double x2, double y2) {
-  delete coord1;
-  coord1 = new AnnotCoord(x1, y1);
-  delete coord2;
-  coord2 = new AnnotCoord(x2, y2);
+  coord1 = std::make_unique<AnnotCoord>(x1, y1);
+  coord2 = std::make_unique<AnnotCoord>(x2, y2);
 
   Array *lArray = new Array(xref);
   lArray->add( Object(x1) );
@@ -3211,15 +2984,13 @@ void AnnotLine::setStartEndStyle(AnnotLineEndingStyle start, AnnotLineEndingStyl
   invalidateAppearance();
 }
 
-void AnnotLine::setInteriorColor(AnnotColor *new_color) {
-  delete interiorColor;
-
+void AnnotLine::setInteriorColor(std::unique_ptr<AnnotColor> &&new_color) {
   if (new_color) {
     Object obj1 = new_color->writeToObject(xref);
     update ("IC", std::move(obj1));
-    interiorColor = new_color;
+    interiorColor = std::move(new_color);
   } else {
-    interiorColor = NULL;
+    interiorColor = nullptr;
   }
   invalidateAppearance();
 }
@@ -3260,14 +3031,14 @@ void AnnotLine::generateLineAppearance()
 {
   double borderWidth, ca = opacity;
 
-  appearBBox = new AnnotAppearanceBBox(rect);
-  appearBuf = new GooString ();
+  appearBBox = std::make_unique<AnnotAppearanceBBox>(rect.get());
+  appearBuf = std::make_unique<GooString>();
   appearBuf->append ("q\n");
   if (color) {
-    setColor(color, gFalse);
+    setColor(color.get(), gFalse);
   }
 
-  setLineStyleForBorder(border);
+  setLineStyleForBorder(border.get());
   borderWidth = border->getWidth();
   appearBBox->setBorderWidth(std::max(1., borderWidth));
 
@@ -3306,7 +3077,7 @@ void AnnotLine::generateLineAppearance()
     while (i < contents->getLength()) {
       GooString out;
       double linewidth;
-      layoutText(contents, &out, &i, font, &linewidth, 0, NULL, gFalse);
+      layoutText(contents.get(), &out, &i, font, &linewidth, 0, NULL, gFalse);
       linewidth *= fontsize;
       if (linewidth > captionwidth) {
         captionwidth = linewidth;
@@ -3375,11 +3146,11 @@ void AnnotLine::generateLineAppearance()
     while (i < contents->getLength()) {
       GooString out;
       double linewidth, xpos;
-      layoutText(contents, &out, &i, font, &linewidth, 0, NULL, gFalse);
+      layoutText(contents.get(), &out, &i, font, &linewidth, 0, NULL, gFalse);
       linewidth *= fontsize;
       xpos = (captionwidth - linewidth) / 2;
       appearBuf->appendf("{0:.2f} {1:.2f} Td\n", xpos - xposPrev, -fontsize);
-      writeString(&out, appearBuf);
+      writeString(&out, appearBuf.get());
       appearBuf->append ("Tj\n");
       xposPrev = xpos;
     }
@@ -3414,13 +3185,11 @@ void AnnotLine::generateLineAppearance()
     appearance = createForm(bbox, gFalse, fontResDict);
   } else {
     Object aStream = createForm(bbox, gTrue, fontResDict);
-    delete appearBuf;
-
-    appearBuf = new GooString ("/GS0 gs\n/Fm0 Do");
+    appearBuf = std::make_unique<GooString>("/GS0 gs\n/Fm0 Do");
     Dict *resDict = createResourcesDict("Fm0", std::move(aStream), "GS0", ca, NULL);
     appearance = createForm(bbox, gFalse, resDict);
   }
-  delete appearBuf;
+  appearBuf = nullptr;
 }
 
 void AnnotLine::draw(Gfx *gfx, GBool printing) {
@@ -3435,12 +3204,12 @@ void AnnotLine::draw(Gfx *gfx, GBool printing) {
   // draw the appearance stream
   Object obj = appearance.fetch(gfx->getXRef());
   if (appearBBox) {
-    gfx->drawAnnot(&obj, (AnnotBorder *)NULL, color,
+    gfx->drawAnnot(&obj, (AnnotBorder *)NULL, color.get(),
                    appearBBox->getPageXMin(), appearBBox->getPageYMin(),
                    appearBBox->getPageXMax(), appearBBox->getPageYMax(),
                    getRotation());
   } else {
-    gfx->drawAnnot(&obj, (AnnotBorder *)NULL, color,
+    gfx->drawAnnot(&obj, (AnnotBorder *)NULL, color.get(),
                    rect->x1, rect->y1, rect->x2, rect->y2, getRotation());
   }
 }
@@ -3514,16 +3283,11 @@ void AnnotTextMarkup::initialize(PDFDoc *docA, Dict *dict) {
 
   obj1 = dict->lookup("QuadPoints");
   if (obj1.isArray()) {
-    quadrilaterals = new AnnotQuadrilaterals(obj1.getArray(), rect);
+    quadrilaterals = std::make_unique<AnnotQuadrilaterals>(obj1.getArray(), rect.get());
   } else {
     error(errSyntaxError, -1, "Bad Annot Text Markup QuadPoints");
-    quadrilaterals = NULL;
     ok = gFalse;
   }
-}
-
-AnnotTextMarkup::~AnnotTextMarkup() {
-  delete quadrilaterals;
 }
 
 void AnnotTextMarkup::setType(AnnotSubtype new_type) {
@@ -3565,8 +3329,7 @@ void AnnotTextMarkup::setQuadrilaterals(AnnotQuadrilaterals *quadPoints) {
     a->add(Object(quadPoints->getY4(i)));
   }
 
-  delete quadrilaterals;
-  quadrilaterals = new AnnotQuadrilaterals(a, rect);
+  quadrilaterals = std::make_unique<AnnotQuadrilaterals>(a, rect.get());
 
   annotObj.dictSet ("QuadPoints", Object(a));
   invalidateAppearance();
@@ -3584,12 +3347,11 @@ void AnnotTextMarkup::draw(Gfx *gfx, GBool printing) {
     GBool blendMultiply = gTrue;
     ca = opacity;
 
-    appearBuf = new GooString ();
+    appearBuf = std::make_unique<GooString>();
     appearBuf->append ("q\n");
 
     /* Adjust BBox */
-    delete appearBBox;
-    appearBBox = new AnnotAppearanceBBox(rect);
+    appearBBox = std::make_unique<AnnotAppearanceBBox>(rect.get());
     for (i = 0; i < quadrilaterals->getQuadrilateralsLength(); ++i) {
       appearBBox->extendTo (quadrilaterals->getX1(i) - rect->x1, quadrilaterals->getY1(i) - rect->y1);
       appearBBox->extendTo (quadrilaterals->getX2(i) - rect->x1, quadrilaterals->getY2(i) - rect->y1);
@@ -3600,7 +3362,7 @@ void AnnotTextMarkup::draw(Gfx *gfx, GBool printing) {
     switch (type) {
     case typeUnderline:
       if (color) {
-        setColor(color, gFalse);
+        setColor(color.get(), gFalse);
       }
       appearBuf->append ("[] 0 d 1 w\n");
 
@@ -3619,7 +3381,7 @@ void AnnotTextMarkup::draw(Gfx *gfx, GBool printing) {
       break;
     case typeStrikeOut:
       if (color) {
-        setColor(color, gFalse);
+        setColor(color.get(), gFalse);
       }
       blendMultiply = gFalse;
       appearBuf->append ("[] 0 d 1 w\n");
@@ -3645,7 +3407,7 @@ void AnnotTextMarkup::draw(Gfx *gfx, GBool printing) {
       break;
     case typeSquiggly:
       if (color) {
-        setColor(color, gFalse);
+        setColor(color.get(), gFalse);
       }
       appearBuf->append ("[] 0 d 1 w\n");
 
@@ -3672,7 +3434,7 @@ void AnnotTextMarkup::draw(Gfx *gfx, GBool printing) {
     default:
     case typeHighlight:
       if (color)
-        setColor(color, gTrue);
+        setColor(color.get(), gTrue);
 
       double biggestBorder = 0;
       for (i = 0; i < quadrilaterals->getQuadrilateralsLength(); ++i) {
@@ -3713,32 +3475,28 @@ void AnnotTextMarkup::draw(Gfx *gfx, GBool printing) {
     bbox[2] = appearBBox->getPageXMax();
     bbox[3] = appearBBox->getPageYMax();
     aStream = createForm(bbox, gTrue, NULL);
-    delete appearBuf;
-
-    appearBuf = new GooString ("/GS0 gs\n/Fm0 Do");
+    appearBuf = std::make_unique<GooString>("/GS0 gs\n/Fm0 Do");
     Dict *resDict = createResourcesDict("Fm0", std::move(aStream), "GS0", 1, blendMultiply ? "Multiply" : NULL);
     if (ca == 1) {
       appearance = createForm(bbox, gFalse, resDict);
     } else {
       aStream = createForm(bbox, gTrue, resDict);
-      delete appearBuf;
-
-      appearBuf = new GooString ("/GS0 gs\n/Fm0 Do");
+      appearBuf = std::make_unique<GooString>("/GS0 gs\n/Fm0 Do");
       Dict *resDict2 = createResourcesDict("Fm0", std::move(aStream), "GS0", ca, NULL);
       appearance = createForm(bbox, gFalse, resDict2);
     }
-    delete appearBuf;
+    appearBuf = nullptr;
   }
 
   // draw the appearance stream
   Object obj = appearance.fetch(gfx->getXRef());
   if (appearBBox) {
-    gfx->drawAnnot(&obj, (AnnotBorder *)NULL, color,
+    gfx->drawAnnot(&obj, (AnnotBorder *)NULL, color.get(),
                    appearBBox->getPageXMin(), appearBBox->getPageYMin(),
                    appearBBox->getPageXMax(), appearBBox->getPageYMax(),
                    getRotation());
   } else {
-    gfx->drawAnnot(&obj, (AnnotBorder *)NULL, color,
+    gfx->drawAnnot(&obj, (AnnotBorder *)NULL, color.get(),
                    rect->x1, rect->y1, rect->x2, rect->y2, getRotation());
   }
 }
@@ -3759,17 +3517,6 @@ AnnotWidget::AnnotWidget(PDFDoc *docA, Object *dictObject, Object *obj, FormFiel
   type = typeWidget;
   field = fieldA;
   initialize(docA, dictObject->getDict());
-}
-
-AnnotWidget::~AnnotWidget() {
-  if (appearCharacs)
-    delete appearCharacs;
-  
-  if (action)
-    delete action;
-
-  if (parent)
-    delete parent;
 }
 
 void AnnotWidget::initialize(PDFDoc *docA, Dict *dict) {
@@ -3796,15 +3543,12 @@ void AnnotWidget::initialize(PDFDoc *docA, Dict *dict) {
 
   obj1 = dict->lookup("MK");
   if (obj1.isDict()) {
-    appearCharacs = new AnnotAppearanceCharacs(obj1.getDict());
-  } else {
-    appearCharacs = NULL;
+    appearCharacs = std::make_unique<AnnotAppearanceCharacs>(obj1.getDict());
   }
 
-  action = NULL;
   obj1 = dict->lookup("A");
   if (obj1.isDict()) {
-    action = LinkAction::parseAction(&obj1, doc->getCatalog()->getBaseURI());
+    action.reset(LinkAction::parseAction(&obj1, doc->getCatalog()->getBaseURI()));
   }
 
   additionalActions = dict->lookupNF("AA");
@@ -3818,8 +3562,7 @@ void AnnotWidget::initialize(PDFDoc *docA, Dict *dict) {
 
   obj1 = dict->lookup("BS");
   if (obj1.isDict()) {
-    delete border;
-    border = new AnnotBorderBS(obj1.getDict());
+    border = std::make_unique<AnnotBorderBS>(obj1.getDict());
   }
 
   updatedAppearanceStream.num = updatedAppearanceStream.gen = -1;
@@ -4083,7 +3826,8 @@ void AnnotWidget::drawText(GooString *text, GooString *da, GfxResources *resourc
     GBool txField, GBool forceZapfDingbats,
     GBool password) {
   GooList *daToks;
-  GooString *tok, *convertedText;
+  GooString *tok;
+  GooString convertedText;
   GfxFont *font;
   double dx, dy;
   double fontSize, fontSize2, borderWidth, x, xPrev, y, w, wMax;
@@ -4188,8 +3932,6 @@ void AnnotWidget::drawText(GooString *text, GooString *da, GfxResources *resourc
     freeText = gTrue;
   }
 
-  convertedText = new GooString;
-
   // setup
   if (txField) {
     appearBuf->append("/Tx BMC\n");
@@ -4231,7 +3973,7 @@ void AnnotWidget::drawText(GooString *text, GooString *da, GfxResources *resourc
         y = dy - 3;
         i = 0;
         while (i < text->getLength()) {
-          layoutText(text, convertedText, &i, font, &w, wMax / fontSize, NULL,
+          layoutText(text, &convertedText, &i, font, &w, wMax / fontSize, NULL,
                      forceZapfDingbats);
           y -= fontSize;
         }
@@ -4278,7 +4020,7 @@ void AnnotWidget::drawText(GooString *text, GooString *da, GfxResources *resourc
     i = 0;
     xPrev = 0;
     while (i < text->getLength()) {
-      layoutText(text, convertedText, &i, font, &w, wMax / fontSize, NULL,
+      layoutText(text, &convertedText, &i, font, &w, wMax / fontSize, NULL,
                  forceZapfDingbats);
       w *= fontSize;
 
@@ -4298,7 +4040,7 @@ void AnnotWidget::drawText(GooString *text, GooString *da, GfxResources *resourc
 
       // draw the line
       appearBuf->appendf("{0:.2f} {1:.2f} Td\n", x - xPrev, -fontSize);
-      writeString(convertedText, appearBuf);
+      writeString(&convertedText, appearBuf.get());
       appearBuf->append(" Tj\n");
 
       // next line
@@ -4331,7 +4073,7 @@ void AnnotWidget::drawText(GooString *text, GooString *da, GfxResources *resourc
       }
 
       i = 0;
-      layoutText(text, convertedText, &i, font, NULL, 0.0, &charCount,
+      layoutText(text, &convertedText, &i, font, NULL, 0.0, &charCount,
                  forceZapfDingbats);
       if (charCount > comb)
         charCount = comb;
@@ -4374,8 +4116,8 @@ void AnnotWidget::drawText(GooString *text, GooString *da, GfxResources *resourc
       }
 
       // write the text string
-      char *s = convertedText->getCString();
-      int len = convertedText->getLength();
+      char *s = convertedText.getCString();
+      int len = convertedText.getLength();
       i = 0;
       xPrev = w;                // so that first character is placed properly
       while (i < comb && len > 0) {
@@ -4394,10 +4136,9 @@ void AnnotWidget::drawText(GooString *text, GooString *da, GfxResources *resourc
         x = 0.5 * (w - dx);
         appearBuf->appendf("{0:.2f} 0 Td\n", x - xPrev + w);
 
-        GooString *charBuf = new GooString(s, n);
-        writeString(charBuf, appearBuf);
+        GooString charBuf(s, n);
+        writeString(&charBuf, appearBuf.get());
         appearBuf->append(" Tj\n");
-        delete charBuf;
 
         i++;
         s += n;
@@ -4408,7 +4149,7 @@ void AnnotWidget::drawText(GooString *text, GooString *da, GfxResources *resourc
       // regular (non-comb) formatting
     } else {
       i = 0;
-      layoutText(text, convertedText, &i, font, &w, 0.0, NULL,
+      layoutText(text, &convertedText, &i, font, &w, 0.0, NULL,
                  forceZapfDingbats);
 
       // compute font autosize
@@ -4465,7 +4206,7 @@ void AnnotWidget::drawText(GooString *text, GooString *da, GfxResources *resourc
       }
 
       // write the text string
-      writeString(convertedText, appearBuf);
+      writeString(&convertedText, appearBuf.get());
       appearBuf->append(" Tj\n");
     }
   }
@@ -4481,7 +4222,6 @@ void AnnotWidget::drawText(GooString *text, GooString *da, GfxResources *resourc
   if (freeText) {
     delete text;
   }
-  delete convertedText;
   if (freeFont) {
     font->decRefCnt();
   }
@@ -4491,7 +4231,8 @@ void AnnotWidget::drawText(GooString *text, GooString *da, GfxResources *resourc
 void AnnotWidget::drawListBox(FormFieldChoice *fieldChoice,
 			      GooString *da, GfxResources *resources, int quadding) {
   GooList *daToks;
-  GooString *tok, *convertedText;
+  GooString *tok;
+  GooString convertedText;
   GfxFont *font;
   double fontSize, fontSize2, borderWidth, x, y, w, wMax;
   int tfPos, tmPos, i, j;
@@ -4552,8 +4293,6 @@ void AnnotWidget::drawListBox(FormFieldChoice *fieldChoice,
     return;
   }
 
-  convertedText = new GooString;
-
   // get the border width
   borderWidth = border ? border->getWidth() : 0;
 
@@ -4567,10 +4306,9 @@ void AnnotWidget::drawListBox(FormFieldChoice *fieldChoice,
         if (daToks) {
           deleteGooList(daToks, GooString);
         }
-        delete convertedText;
         return;
       }
-      layoutText(fieldChoice->getChoice(i), convertedText, &j, font, &w, 0.0, NULL, gFalse);
+      layoutText(fieldChoice->getChoice(i), &convertedText, &j, font, &w, 0.0, NULL, gFalse);
       if (w > wMax) {
         wMax = w;
       }
@@ -4608,7 +4346,7 @@ void AnnotWidget::drawListBox(FormFieldChoice *fieldChoice,
 
     // compute text width and start position
     j = 0;
-    layoutText(fieldChoice->getChoice(i), convertedText, &j, font, &w, 0.0, NULL, gFalse);
+    layoutText(fieldChoice->getChoice(i), &convertedText, &j, font, &w, 0.0, NULL, gFalse);
     w *= fontSize;
     switch (quadding) {
     case quaddingLeftJustified:
@@ -4651,7 +4389,7 @@ void AnnotWidget::drawListBox(FormFieldChoice *fieldChoice,
     }
 
     // write the text string
-    writeString(convertedText, appearBuf);
+    writeString(&convertedText, appearBuf.get());
     appearBuf->append(" Tj\n");
 
     // cleanup
@@ -4665,8 +4403,6 @@ void AnnotWidget::drawListBox(FormFieldChoice *fieldChoice,
   if (daToks) {
     deleteGooList(daToks, GooString);
   }
-
-  delete convertedText;
 }
 
 void AnnotWidget::drawBorder() {
@@ -4856,7 +4592,7 @@ void AnnotWidget::generateFieldAppearance() {
   GfxResources *resources;
   GooString *da;
 
-  appearBuf = new GooString ();
+  appearBuf = std::make_unique<GooString>();
 
   // draw the background
   if (appearCharacs) {
@@ -4918,7 +4654,7 @@ void AnnotWidget::generateFieldAppearance() {
   MemStream *appearStream = new MemStream(copyString(appearBuf->getCString()), 0,
       appearBuf->getLength(), Object(appearDict));
   appearance = Object(static_cast<Stream*>(appearStream));
-  delete appearBuf;
+  appearBuf = nullptr;
 
   appearStream->setNeedFree(gTrue);
 }
@@ -4954,7 +4690,7 @@ void AnnotWidget::updateAppearanceStream()
     obj1.dictAdd(copyString("N"), Object(updatedAppearanceStream.num, updatedAppearanceStream.gen));
 
     // Update our internal pointers to the appearance dictionary
-    appearStreams = new AnnotAppearance(doc, &obj1);
+    appearStreams = std::make_unique<AnnotAppearance>(doc, &obj1);
 
     update("AP", std::move(obj1));
   } else {
@@ -4995,7 +4731,7 @@ void AnnotWidget::draw(Gfx *gfx, GBool printing) {
     gfx->pushResources(dict);
     delete dict;
   }
-  gfx->drawAnnot(&obj, (AnnotBorder *)NULL, color,
+  gfx->drawAnnot(&obj, (AnnotBorder *)NULL, color.get(),
 		 rect->x1, rect->y1, rect->x2, rect->y2, getRotation());
   if (addDingbatsResource) {
     gfx->popResources();
@@ -5013,7 +4749,7 @@ AnnotMovie::AnnotMovie(PDFDoc *docA, PDFRectangle *rect, Movie *movieA) :
   type = typeMovie;
   annotObj.dictSet ("Subtype", Object(objName, "Movie"));
 
-  movie = movieA->copy();
+  movie.reset(movieA->copy());
   // TODO: create movie dict from movieA
 
   initialize(docA, annotObj.getDict());
@@ -5025,37 +4761,27 @@ AnnotMovie::AnnotMovie(PDFDoc *docA, Object *dictObject, Object *obj) :
   initialize(docA, dictObject->getDict());
 }
 
-AnnotMovie::~AnnotMovie() {
-  if (title)
-    delete title;
-  delete movie;
-}
-
 void AnnotMovie::initialize(PDFDoc *docA, Dict* dict) {
   Object obj1;
 
   obj1 = dict->lookup("T");
   if (obj1.isString()) {
-    title = obj1.getString()->copy();
-  } else {
-    title = NULL;
+    title.reset(obj1.getString()->copy());
   }
 
   Object movieDict = dict->lookup("Movie");
   if (movieDict.isDict()) {
     Object obj2 = dict->lookup("A");
     if (obj2.isDict())
-      movie = new Movie (&movieDict, &obj2);
+      movie = std::make_unique<Movie>(&movieDict, &obj2);
     else
-      movie = new Movie (&movieDict);
+      movie = std::make_unique<Movie>(&movieDict);
     if (!movie->isOk()) {
-      delete movie;
-      movie = NULL;
+      movie = nullptr;
       ok = gFalse;
     }
   } else {
     error(errSyntaxError, -1, "Bad Annot Movie");
-    movie = NULL;
     ok = gFalse;
   }
 }
@@ -5071,7 +4797,7 @@ void AnnotMovie::draw(Gfx *gfx, GBool printing) {
     movie->getAspect(&width, &height);
 
     if (width != -1 && height != -1 && !poster.isNone()) {
-      appearBuf = new GooString ();
+      appearBuf = std::make_unique<GooString>();
       appearBuf->append ("q\n");
       appearBuf->appendf ("{0:d} 0 0 {1:d} 0 0 cm\n", width, height);
       appearBuf->append ("/MImg Do\n");
@@ -5106,7 +4832,6 @@ void AnnotMovie::draw(Gfx *gfx, GBool printing) {
       MemStream *mStream = new MemStream(copyString(appearBuf->getCString()), 0,
 			      appearBuf->getLength(), Object(formDict));
       mStream->setNeedFree(gTrue);
-      delete appearBuf;
 
       Dict *dict = new Dict(gfx->getXRef());
       dict->set("FRM", Object(static_cast<Stream*>(mStream)));
@@ -5114,7 +4839,7 @@ void AnnotMovie::draw(Gfx *gfx, GBool printing) {
       Dict *resDict2 = new Dict(gfx->getXRef());
       resDict2->set("XObject", Object(dict));
 
-      appearBuf = new GooString ();
+      appearBuf = std::make_unique<GooString>();
       appearBuf->append ("q\n");
       appearBuf->appendf ("0 0 {0:d} {1:d} re W n\n", width, height);
       appearBuf->append ("q\n");
@@ -5129,13 +4854,13 @@ void AnnotMovie::draw(Gfx *gfx, GBool printing) {
       bbox[2] = width;
       bbox[3] = height;
       appearance = createForm(bbox, gFalse, resDict2);
-      delete appearBuf;
+      appearBuf = nullptr;
     }
   }
 
   // draw the appearance stream
   Object obj = appearance.fetch(gfx->getXRef());
-  gfx->drawAnnot(&obj, (AnnotBorder *)NULL, color,
+  gfx->drawAnnot(&obj, (AnnotBorder *)NULL, color.get(),
 		 rect->x1, rect->y1, rect->x2, rect->y2, getRotation());
 }
 
@@ -5158,39 +4883,29 @@ AnnotScreen::AnnotScreen(PDFDoc *docA, Object *dictObject, Object *obj) :
   initialize(docA, dictObject->getDict());
 }
 
-AnnotScreen::~AnnotScreen() {
-  delete title;
-  delete appearCharacs;
-  delete action;
-}
-
 void AnnotScreen::initialize(PDFDoc *docA, Dict* dict) {
   Object obj1;
 
-  title = NULL;
   obj1 = dict->lookup("T");
   if (obj1.isString()) {
-    title = obj1.getString()->copy();
+    title.reset(obj1.getString()->copy());
   }
 
-  action = NULL;
   obj1 = dict->lookup("A");
   if (obj1.isDict()) {
-    action = LinkAction::parseAction(&obj1, doc->getCatalog()->getBaseURI());
+    action.reset(LinkAction::parseAction(&obj1, doc->getCatalog()->getBaseURI()));
     if (action->getKind() == actionRendition && page == 0) {
       error (errSyntaxError, -1, "Invalid Rendition action: associated screen annotation without P");
-      delete action;
-      action = NULL;
+      action = nullptr;
       ok = gFalse;
     }
   }
 
   additionalActions = dict->lookupNF("AA");
 
-  appearCharacs = NULL;
   obj1 = dict->lookup("MK");
   if (obj1.isDict()) {
-    appearCharacs = new AnnotAppearanceCharacs(obj1.getDict());
+    appearCharacs = std::make_unique<AnnotAppearanceCharacs>(obj1.getDict());
   }
 }
 
@@ -5220,27 +4935,21 @@ AnnotStamp::AnnotStamp(PDFDoc *docA, Object *dictObject, Object *obj) :
   initialize(docA, dictObject->getDict());
 }
 
-AnnotStamp::~AnnotStamp() {
-  delete icon;
-}
-
 void AnnotStamp::initialize(PDFDoc *docA, Dict* dict) {
   Object obj1 = dict->lookup("Name");
   if (obj1.isName()) {
-    icon = new GooString(obj1.getName());
+    icon = std::make_unique<GooString>(obj1.getName());
   } else {
-    icon = new GooString("Draft");
+    icon = std::make_unique<GooString>("Draft");
   }
 
 }
 
 void AnnotStamp::setIcon(GooString *new_icon) {
-  delete icon;
-
   if (new_icon) {
-    icon = new GooString (new_icon);
+    icon = std::make_unique<GooString>(new_icon);
   } else {
-    icon = new GooString();
+    icon = std::make_unique<GooString>();
   }
 
   update("Name", Object(objName, icon->getCString()));
@@ -5275,12 +4984,6 @@ AnnotGeometry::AnnotGeometry(PDFDoc *docA, Object *dictObject, Object *obj) :
   initialize(docA, dictObject->getDict());
 }
 
-AnnotGeometry::~AnnotGeometry() {
-  delete interiorColor;
-  delete borderEffect;
-  delete geometryRect;
-}
-
 void AnnotGeometry::initialize(PDFDoc *docA, Dict* dict) {
   Object obj1;
 
@@ -5296,30 +4999,24 @@ void AnnotGeometry::initialize(PDFDoc *docA, Dict* dict) {
 
   obj1 = dict->lookup("IC");
   if (obj1.isArray()) {
-    interiorColor = new AnnotColor(obj1.getArray());
-  } else {
-    interiorColor = NULL;
+    interiorColor = std::make_unique<AnnotColor>(obj1.getArray());
   }
 
   obj1 = dict->lookup("BS");
   if (obj1.isDict()) {
-    delete border;
-    border = new AnnotBorderBS(obj1.getDict());
+    border = std::make_unique<AnnotBorderBS>(obj1.getDict());
   } else if (!border) {
-    border = new AnnotBorderBS();
+    border = std::make_unique<AnnotBorderBS>();
   }
 
   obj1 = dict->lookup("BE");
   if (obj1.isDict()) {
-    borderEffect = new AnnotBorderEffect(obj1.getDict());
-  } else {
-    borderEffect = NULL;
+    borderEffect = std::make_unique<AnnotBorderEffect>(obj1.getDict());
   }
 
-  geometryRect = NULL;
   obj1 = dict->lookup("RD");
   if (obj1.isArray()) {
-    geometryRect = parseDiffRectangle(obj1.getArray(), rect);
+    geometryRect = parseDiffRectangle(obj1.getArray(), rect.get());
   }
 }
 
@@ -5342,15 +5039,13 @@ void AnnotGeometry::setType(AnnotSubtype new_type) {
   invalidateAppearance();
 }
 
-void AnnotGeometry::setInteriorColor(AnnotColor *new_color) {
-  delete interiorColor;
-
+void AnnotGeometry::setInteriorColor(std::unique_ptr<AnnotColor> &&new_color) {
   if (new_color) {
     Object obj1 = new_color->writeToObject(xref);
     update ("IC", std::move(obj1));
-    interiorColor = new_color;
+    interiorColor = std::move(new_color);
   } else {
-    interiorColor = NULL;
+    interiorColor = nullptr;
   }
   invalidateAppearance();
 }
@@ -5365,16 +5060,16 @@ void AnnotGeometry::draw(Gfx *gfx, GBool printing) {
   if (appearance.isNull()) {
     ca = opacity;
 
-    appearBuf = new GooString ();
+    appearBuf = std::make_unique<GooString>();
     appearBuf->append ("q\n");
     if (color)
-      setColor(color, gFalse);
+      setColor(color.get(), gFalse);
 
     double borderWidth = border->getWidth();
-    setLineStyleForBorder(border);
+    setLineStyleForBorder(border.get());
 
     if (interiorColor)
-      setColor(interiorColor, gTrue);
+      setColor(interiorColor.get(), gTrue);
 
     if (type == typeSquare) {
       appearBuf->appendf ("{0:.2f} {1:.2f} {2:.2f} {3:.2f} re\n",
@@ -5444,18 +5139,16 @@ void AnnotGeometry::draw(Gfx *gfx, GBool printing) {
       appearance = createForm(bbox, gFalse, nullptr);
     } else {
       Object aStream = createForm(bbox, gTrue, nullptr);
-      delete appearBuf;
-
-      appearBuf = new GooString ("/GS0 gs\n/Fm0 Do");
+      appearBuf = std::make_unique<GooString>("/GS0 gs\n/Fm0 Do");
       Dict *resDict = createResourcesDict("Fm0", std::move(aStream), "GS0", ca, NULL);
       appearance = createForm(bbox, gFalse, resDict);
     }
-    delete appearBuf;
+    appearBuf = nullptr;
   }
 
   // draw the appearance stream
   Object obj = appearance.fetch(gfx->getXRef());
-  gfx->drawAnnot(&obj, (AnnotBorder *)NULL, color,
+  gfx->drawAnnot(&obj, (AnnotBorder *)NULL, color.get(),
 		 rect->x1, rect->y1, rect->x2, rect->y2, getRotation());
 }
 
@@ -5493,16 +5186,6 @@ AnnotPolygon::AnnotPolygon(PDFDoc *docA, Object *dictObject, Object *obj) :
   initialize(docA, dictObject->getDict());
 }
 
-AnnotPolygon::~AnnotPolygon() {
-  delete vertices;
-
-  if (interiorColor)
-    delete interiorColor;
-
-  if (borderEffect)
-    delete borderEffect;
-}
-
 void AnnotPolygon::initialize(PDFDoc *docA, Dict* dict) {
   Object obj1;
 
@@ -5518,9 +5201,9 @@ void AnnotPolygon::initialize(PDFDoc *docA, Dict* dict) {
 
   obj1 = dict->lookup("Vertices");
   if (obj1.isArray()) {
-    vertices = new AnnotPath(obj1.getArray());
+    vertices = std::make_unique<AnnotPath>(obj1.getArray());
   } else {
-    vertices = new AnnotPath();
+    vertices = std::make_unique<AnnotPath>();
     error(errSyntaxError, -1, "Bad Annot Polygon Vertices");
     ok = gFalse;
   }
@@ -5545,24 +5228,19 @@ void AnnotPolygon::initialize(PDFDoc *docA, Dict* dict) {
 
   obj1 = dict->lookup("IC");
   if (obj1.isArray()) {
-    interiorColor = new AnnotColor(obj1.getArray());
-  } else {
-    interiorColor = NULL;
+    interiorColor = std::make_unique<AnnotColor>(obj1.getArray());
   }
 
   obj1 = dict->lookup("BS");
   if (obj1.isDict()) {
-    delete border;
-    border = new AnnotBorderBS(obj1.getDict());
+    border = std::make_unique<AnnotBorderBS>(obj1.getDict());
   } else if (!border) {
-    border = new AnnotBorderBS();
+    border = std::make_unique<AnnotBorderBS>();
   }
 
   obj1 = dict->lookup("BE");
   if (obj1.isDict()) {
-    borderEffect = new AnnotBorderEffect(obj1.getDict());
-  } else {
-    borderEffect = NULL;
+    borderEffect = std::make_unique<AnnotBorderEffect>(obj1.getDict());
   }
 
   obj1 = dict->lookup("IT");
@@ -5601,15 +5279,13 @@ void AnnotPolygon::setType(AnnotSubtype new_type) {
 }
 
 void AnnotPolygon::setVertices(AnnotPath *path) {
-  delete vertices;
-
   Array *a = new Array(xref);
   for (int i = 0; i < path->getCoordsLength(); i++) {
     a->add(Object(path->getX(i)));
     a->add(Object(path->getY(i)));
   }
 
-  vertices = new AnnotPath(a);
+  vertices = std::make_unique<AnnotPath>(a);
 
   update("Vertices", Object(a));
   invalidateAppearance();
@@ -5627,15 +5303,11 @@ void AnnotPolygon::setStartEndStyle(AnnotLineEndingStyle start, AnnotLineEndingS
   invalidateAppearance();
 }
 
-void AnnotPolygon::setInteriorColor(AnnotColor *new_color) {
-  delete interiorColor;
-
+void AnnotPolygon::setInteriorColor(std::unique_ptr<AnnotColor> &&new_color) {
   if (new_color) {
     Object obj1 = new_color->writeToObject(xref);
     update ("IC", std::move(obj1));
-    interiorColor = new_color;
-  } else {
-    interiorColor = NULL;
+    interiorColor = std::move(new_color);
   }
   invalidateAppearance();
 }
@@ -5661,21 +5333,21 @@ void AnnotPolygon::draw(Gfx *gfx, GBool printing) {
 
   annotLocker();
   if (appearance.isNull()) {
-    appearBBox = new AnnotAppearanceBBox(rect);
+    appearBBox = std::make_unique<AnnotAppearanceBBox>(rect.get());
     ca = opacity;
 
-    appearBuf = new GooString ();
+    appearBuf = std::make_unique<GooString>();
     appearBuf->append ("q\n");
 
     if (color) {
-      setColor(color, gFalse);
+      setColor(color.get(), gFalse);
     }
 
-    setLineStyleForBorder(border);
+    setLineStyleForBorder(border.get());
     appearBBox->setBorderWidth(std::max(1., border->getWidth()));
 
     if (interiorColor) {
-      setColor(interiorColor, gTrue);
+      setColor(interiorColor.get(), gTrue);
     }
 
     if (vertices->getCoordsLength() != 0) {
@@ -5706,24 +5378,22 @@ void AnnotPolygon::draw(Gfx *gfx, GBool printing) {
       appearance = createForm(bbox, gFalse, nullptr);
     } else {
       Object aStream = createForm(bbox, gTrue, nullptr);
-      delete appearBuf;
-
-      appearBuf = new GooString ("/GS0 gs\n/Fm0 Do");
+      appearBuf = std::make_unique<GooString>("/GS0 gs\n/Fm0 Do");
       Dict *resDict = createResourcesDict("Fm0", std::move(aStream), "GS0", ca, NULL);
       appearance = createForm(bbox, gFalse, resDict);
     }
-    delete appearBuf;
+    appearBuf = nullptr;
   }
 
   // draw the appearance stream
   Object obj = appearance.fetch(gfx->getXRef());
   if (appearBBox) {
-    gfx->drawAnnot(&obj, (AnnotBorder *)NULL, color,
+    gfx->drawAnnot(&obj, (AnnotBorder *)NULL, color.get(),
                    appearBBox->getPageXMin(), appearBBox->getPageYMin(),
                    appearBBox->getPageXMax(), appearBBox->getPageYMax(),
                    getRotation());
   } else {
-    gfx->drawAnnot(&obj, (AnnotBorder *)NULL, color,
+    gfx->drawAnnot(&obj, (AnnotBorder *)NULL, color.get(),
                    rect->x1, rect->y1, rect->x2, rect->y2, getRotation());
   }
 }
@@ -5747,10 +5417,6 @@ AnnotCaret::AnnotCaret(PDFDoc *docA, Object *dictObject, Object *obj) :
   initialize(docA, dictObject->getDict());
 }
 
-AnnotCaret::~AnnotCaret() {
-  delete caretRect;
-}
-
 void AnnotCaret::initialize(PDFDoc *docA, Dict* dict) {
   Object obj1;
 
@@ -5767,9 +5433,7 @@ void AnnotCaret::initialize(PDFDoc *docA, Dict* dict) {
 
   obj1 = dict->lookup("RD");
   if (obj1.isArray()) {
-    caretRect = parseDiffRectangle(obj1.getArray(), rect);
-  } else {
-    caretRect = NULL;
+    caretRect = parseDiffRectangle(obj1.getArray(), rect.get());
   }
 }
 
@@ -5827,10 +5491,9 @@ void AnnotInk::initialize(PDFDoc *docA, Dict* dict) {
 
   obj1 = dict->lookup("BS");
   if (obj1.isDict()) {
-    delete border;
-    border = new AnnotBorderBS(obj1.getDict());
+    border = std::make_unique<AnnotBorderBS>(obj1.getDict());
   } else if (!border) {
-    border = new AnnotBorderBS();
+    border = std::make_unique<AnnotBorderBS>();
   }
 }
 
@@ -5884,17 +5547,17 @@ void AnnotInk::draw(Gfx *gfx, GBool printing) {
 
   annotLocker();
   if (appearance.isNull()) {
-    appearBBox = new AnnotAppearanceBBox(rect);
+    appearBBox = std::make_unique<AnnotAppearanceBBox>(rect.get());
     ca = opacity;
 
-    appearBuf = new GooString ();
+    appearBuf = std::make_unique<GooString>();
     appearBuf->append ("q\n");
 
     if (color) {
-      setColor(color, gFalse);
+      setColor(color.get(), gFalse);
     }
 
-    setLineStyleForBorder(border);
+    setLineStyleForBorder(border.get());
     appearBBox->setBorderWidth(std::max(1., border->getWidth()));
 
     for (int i = 0; i < inkListLength; ++i) {
@@ -5920,24 +5583,22 @@ void AnnotInk::draw(Gfx *gfx, GBool printing) {
       appearance = createForm(bbox, gFalse, nullptr);
     } else {
       Object aStream = createForm(bbox, gTrue, nullptr);
-      delete appearBuf;
-
-      appearBuf = new GooString ("/GS0 gs\n/Fm0 Do");
+      appearBuf = std::make_unique<GooString>("/GS0 gs\n/Fm0 Do");
       Dict *resDict = createResourcesDict("Fm0", std::move(aStream), "GS0", ca, NULL);
       appearance = createForm(bbox, gFalse, resDict);
     }
-    delete appearBuf;
+    appearBuf = nullptr;
   }
 
   // draw the appearance stream
   Object obj = appearance.fetch(gfx->getXRef());
   if (appearBBox) {
-    gfx->drawAnnot(&obj, (AnnotBorder *)NULL, color,
+    gfx->drawAnnot(&obj, (AnnotBorder *)NULL, color.get(),
                    appearBBox->getPageXMin(), appearBBox->getPageYMin(),
                    appearBBox->getPageXMax(), appearBBox->getPageYMax(),
                    getRotation());
   } else {
-    gfx->drawAnnot(&obj, (AnnotBorder *)NULL, color,
+    gfx->drawAnnot(&obj, (AnnotBorder *)NULL, color.get(),
                    rect->x1, rect->y1, rect->x2, rect->y2, getRotation());
   }
 }
@@ -5963,10 +5624,6 @@ AnnotFileAttachment::AnnotFileAttachment(PDFDoc *docA, Object *dictObject, Objec
   initialize(docA, dictObject->getDict());
 }
 
-AnnotFileAttachment::~AnnotFileAttachment() {
-  delete name;
-}
-
 void AnnotFileAttachment::initialize(PDFDoc *docA, Dict* dict) {
   Object obj1;
 
@@ -5980,9 +5637,9 @@ void AnnotFileAttachment::initialize(PDFDoc *docA, Dict* dict) {
 
   obj1 = dict->lookup("Name");
   if (obj1.isName()) {
-    name = new GooString(obj1.getName());
+    name = std::make_unique<GooString>(obj1.getName());
   } else {
-    name = new GooString("PushPin");
+    name = std::make_unique<GooString>("PushPin");
   }
 }
 
@@ -6108,11 +5765,11 @@ void AnnotFileAttachment::draw(Gfx *gfx, GBool printing) {
   if (appearance.isNull()) {
     ca = opacity;
 
-    appearBuf = new GooString ();
+    appearBuf = std::make_unique<GooString>();
 
     appearBuf->append ("q\n");
     if (color)
-      setColor(color, gTrue);
+      setColor(color.get(), gTrue);
     else
       appearBuf->append ("1 1 1 rg\n");
     if (!name->cmp("PushPin"))
@@ -6132,18 +5789,16 @@ void AnnotFileAttachment::draw(Gfx *gfx, GBool printing) {
       appearance = createForm (bbox, gFalse, nullptr);
     } else {
       Object aStream = createForm (bbox, gTrue, nullptr);
-      delete appearBuf;
-
-      appearBuf = new GooString ("/GS0 gs\n/Fm0 Do");
+      appearBuf = std::make_unique<GooString>("/GS0 gs\n/Fm0 Do");
       Dict *resDict = createResourcesDict("Fm0", std::move(aStream), "GS0", ca, NULL);
       appearance = createForm(bbox, gFalse, resDict);
     }
-    delete appearBuf;
+    appearBuf = nullptr;
   }
 
   // draw the appearance stream
   Object obj = appearance.fetch(gfx->getXRef());
-  gfx->drawAnnot(&obj, (AnnotBorder *)NULL, color,
+  gfx->drawAnnot(&obj, (AnnotBorder *)NULL, color.get(),
 		 rect->x1, rect->y1, rect->x2, rect->y2, getRotation());
 }
 
@@ -6168,16 +5823,10 @@ AnnotSound::AnnotSound(PDFDoc *docA, Object *dictObject, Object *obj) :
   initialize(docA, dictObject->getDict());
 }
 
-AnnotSound::~AnnotSound() {
-  delete sound;
-
-  delete name;
-}
-
 void AnnotSound::initialize(PDFDoc *docA, Dict* dict) {
   Object obj1 = dict->lookup("Sound");
 
-  sound = Sound::parseSound(&obj1);
+  sound.reset(Sound::parseSound(&obj1));
   if (!sound) {
     error(errSyntaxError, -1, "Bad Annot Sound");
     ok = gFalse;
@@ -6185,9 +5834,9 @@ void AnnotSound::initialize(PDFDoc *docA, Dict* dict) {
 
   obj1 = dict->lookup("Name");
   if (obj1.isName()) {
-    name = new GooString(obj1.getName());
+    name = std::make_unique<GooString>(obj1.getName());
   } else {
-    name = new GooString("Speaker");
+    name = std::make_unique<GooString>("Speaker");
   }
 }
 
@@ -6265,11 +5914,11 @@ void AnnotSound::draw(Gfx *gfx, GBool printing) {
   if (appearance.isNull()) {
     ca = opacity;
 
-    appearBuf = new GooString ();
+    appearBuf = std::make_unique<GooString>();
 
     appearBuf->append ("q\n");
     if (color)
-      setColor(color, gTrue);
+      setColor(color.get(), gTrue);
     else
       appearBuf->append ("1 1 1 rg\n");
     if (!name->cmp("Speaker"))
@@ -6285,18 +5934,16 @@ void AnnotSound::draw(Gfx *gfx, GBool printing) {
       appearance = createForm(bbox, gFalse, nullptr);
     } else {
       Object aStream = createForm(bbox, gTrue, nullptr);
-      delete appearBuf;
-
-      appearBuf = new GooString ("/GS0 gs\n/Fm0 Do");
+      appearBuf = std::make_unique<GooString>("/GS0 gs\n/Fm0 Do");
       Dict *resDict = createResourcesDict("Fm0", std::move(aStream), "GS0", ca, NULL);
       appearance = createForm(bbox, gFalse, resDict);
     }
-    delete appearBuf;
+    appearBuf = nullptr;
   }
 
   // draw the appearance stream
   obj = appearance.fetch(gfx->getXRef());
-  gfx->drawAnnot(&obj, (AnnotBorder *)NULL, color,
+  gfx->drawAnnot(&obj, (AnnotBorder *)NULL, color.get(),
 		 rect->x1, rect->y1, rect->x2, rect->y2, getRotation());
 }
 
@@ -6320,17 +5967,10 @@ Annot3D::Annot3D(PDFDoc *docA, Object *dictObject, Object *obj) :
   initialize(docA, dictObject->getDict());
 }
 
-Annot3D::~Annot3D() {
-  if (activation)
-    delete activation;
-}
-
 void Annot3D::initialize(PDFDoc *docA, Dict* dict) {
   Object obj1 = dict->lookup("3DA");
   if (obj1.isDict()) {
-    activation = new Activation(obj1.getDict());
-  } else {
-    activation = NULL;
+    activation = std::make_unique<Activation>(obj1.getDict());
   }
 }
 
@@ -6438,62 +6078,44 @@ AnnotRichMedia::AnnotRichMedia(PDFDoc *docA, Object *dictObject, Object *obj) :
   initialize(docA, dictObject->getDict());
 }
 
-AnnotRichMedia::~AnnotRichMedia() {
-  delete content;
-  delete settings;
-}
-
 void AnnotRichMedia::initialize(PDFDoc *docA, Dict* dict) {
   Object obj1 = dict->lookup("RichMediaContent");
   if (obj1.isDict()) {
-    content = new AnnotRichMedia::Content(obj1.getDict());
-  } else {
-    content = NULL;
+    content = std::make_unique<AnnotRichMedia::Content>(obj1.getDict());
   }
 
   obj1 = dict->lookup("RichMediaSettings");
   if (obj1.isDict()) {
-    settings = new AnnotRichMedia::Settings(obj1.getDict());
-  } else {
-    settings = NULL;
+    settings = std::make_unique<AnnotRichMedia::Settings>(obj1.getDict());
   }
 }
 
 AnnotRichMedia::Content* AnnotRichMedia::getContent() const {
-  return content;
+  return content.get();
 }
 
 AnnotRichMedia::Settings* AnnotRichMedia::getSettings() const {
-  return settings;
+  return settings.get();
 }
 
 AnnotRichMedia::Settings::Settings(Dict *dict) {
   Object obj1 = dict->lookup("Activation");
   if (obj1.isDict()) {
-    activation = new AnnotRichMedia::Activation(obj1.getDict());
-  } else {
-    activation = NULL;
+    activation = std::make_unique<AnnotRichMedia::Activation>(obj1.getDict());
   }
 
   obj1 = dict->lookup("Deactivation");
   if (obj1.isDict()) {
-    deactivation = new AnnotRichMedia::Deactivation(obj1.getDict());
-  } else {
-    deactivation = NULL;
+    deactivation = std::make_unique<AnnotRichMedia::Deactivation>(obj1.getDict());
   }
 }
 
-AnnotRichMedia::Settings::~Settings() {
-  delete activation;
-  delete deactivation;
-}
-
 AnnotRichMedia::Activation* AnnotRichMedia::Settings::getActivation() const {
-  return activation;
+  return activation.get();
 }
 
 AnnotRichMedia::Deactivation* AnnotRichMedia::Settings::getDeactivation() const {
-  return deactivation;
+  return deactivation.get();
 }
 
 AnnotRichMedia::Activation::Activation(Dict *dict) {
@@ -6579,7 +6201,7 @@ AnnotRichMedia::Content::Content(Dict *dict) {
         Object objKey = obj2.arrayGet(i);
         assets[counter]->fileSpec = obj2.arrayGet(i + 1);
 
-        assets[counter]->name = new GooString( objKey.getString() );
+        assets[counter]->name = std::make_unique<GooString>( objKey.getString() );
         ++counter;
 
       }
@@ -6623,18 +6245,8 @@ AnnotRichMedia::Asset* AnnotRichMedia::Content::getAsset(int index) const {
   return assets[index];
 }
 
-AnnotRichMedia::Asset::Asset()
-  : name(NULL)
-{
-}
-
-AnnotRichMedia::Asset::~Asset()
-{
-  delete name;
-}
-
 GooString* AnnotRichMedia::Asset::getName() const {
-  return name;
+  return name.get();
 }
 
 Object* AnnotRichMedia::Asset::getFileSpec() const {
@@ -6663,9 +6275,7 @@ AnnotRichMedia::Configuration::Configuration(Dict *dict)
 
   obj1 = dict->lookup("Name");
   if (obj1.isString()) {
-    name = new GooString(obj1.getString());
-  } else {
-    name = NULL;
+    name = std::make_unique<GooString>(obj1.getString());
   }
 
   obj1 = dict->lookup("Subtype");
@@ -6713,8 +6323,6 @@ AnnotRichMedia::Configuration::~Configuration()
       delete instances[i];
     gfree(instances);
   }
-
-  delete name;
 }
 
 int AnnotRichMedia::Configuration::getInstancesCount() const {
@@ -6729,7 +6337,7 @@ AnnotRichMedia::Instance* AnnotRichMedia::Configuration::getInstance(int index) 
 }
 
 GooString* AnnotRichMedia::Configuration::getName() const {
-  return name;
+  return name.get();
 }
 
 AnnotRichMedia::Configuration::Type AnnotRichMedia::Configuration::getType() const {
@@ -6755,15 +6363,8 @@ AnnotRichMedia::Instance::Instance(Dict *dict)
 
   obj1 = dict->lookup("Params");
   if (obj1.isDict()) {
-    params = new AnnotRichMedia::Params(obj1.getDict());
-  } else {
-    params = NULL;
+    params = std::make_unique<AnnotRichMedia::Params>(obj1.getDict());
   }
-}
-
-AnnotRichMedia::Instance::~Instance()
-{
-  delete params;
 }
 
 AnnotRichMedia::Instance::Type AnnotRichMedia::Instance::getType() const {
@@ -6771,26 +6372,19 @@ AnnotRichMedia::Instance::Type AnnotRichMedia::Instance::getType() const {
 }
 
 AnnotRichMedia::Params* AnnotRichMedia::Instance::getParams() const {
-  return params;
+  return params.get();
 }
 
 AnnotRichMedia::Params::Params(Dict *dict)
 {
   Object obj1 = dict->lookup("FlashVars");
   if (obj1.isString()) {
-    flashVars = new GooString(obj1.getString());
-  } else {
-    flashVars = NULL;
+    flashVars = std::unique_ptr<GooString>(obj1.getString());
   }
 }
 
-AnnotRichMedia::Params::~Params()
-{
-  delete flashVars;
-}
-
 GooString* AnnotRichMedia::Params::getFlashVars() const {
-  return flashVars;
+  return flashVars.get();
 }
 
 //------------------------------------------------------------------------
