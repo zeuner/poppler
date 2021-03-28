@@ -94,7 +94,6 @@ if(CMAKE_COMPILER_IS_GNUCXX)
   set(_warn "${_warn} -Wundef")
   set(_warn "${_warn} -Wzero-as-null-pointer-constant")
   set(_warn "${_warn} -Wshadow")
-  set(_warn "${_warn} -Wsuggest-override")
 
   # set extra warnings
   set(_warnx "${_warnx} -Wconversion")
